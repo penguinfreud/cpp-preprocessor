@@ -11,10 +11,7 @@
     </ADDITIONAL_GENERATION_ENVIRONMENT>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="56590d51-e6a7-4a98-a2a9-7eb742d8ad12" name="Default" comment="">
-      <change type="MODIFICATION" beforePath="$PROJECT_DIR$/.idea/workspace.xml" afterPath="$PROJECT_DIR$/.idea/workspace.xml" />
-      <change type="MODIFICATION" beforePath="$PROJECT_DIR$/preprocessor.h" afterPath="$PROJECT_DIR$/preprocessor.h" />
-    </list>
+    <list default="true" id="56590d51-e6a7-4a98-a2a9-7eb742d8ad12" name="Default" comment="" />
     <ignored path="lab3.iws" />
     <ignored path=".idea/workspace.xml" />
     <option name="EXCLUDED_CONVERTED_TO_IGNORED" value="true" />
@@ -59,7 +56,7 @@
       <file leaf-file-name="preprocessor.h" pinned="false" current-in-tab="true">
         <entry file="file://$PROJECT_DIR$/preprocessor.h">
           <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="-1440">
+            <state relative-caret-position="-1692">
               <caret line="78" column="45" selection-start-line="78" selection-start-column="45" selection-end-line="78" selection-end-column="45" />
               <folding />
             </state>
@@ -247,7 +244,7 @@
     </entry>
     <entry file="file://$PROJECT_DIR$/preprocessor.h">
       <provider selected="true" editor-type-id="text-editor">
-        <state relative-caret-position="-1440">
+        <state relative-caret-position="-1692">
           <caret line="78" column="45" selection-start-line="78" selection-start-column="45" selection-end-line="78" selection-end-column="45" />
           <folding />
         </state>
