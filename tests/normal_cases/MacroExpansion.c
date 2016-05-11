@@ -18,6 +18,8 @@ e
 #define f (0)
 #define g() a
 g()f
+#define g2(x, y) x y
+g2(g(), f)
 
 #define h(x) x(0)
 h(a)

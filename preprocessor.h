@@ -2,6 +2,7 @@
 #define PREPROCESSOR_H
 
 #include <istream>
+#include <vector>
 
 /*
  * C++ Preprocessor Grammar
@@ -201,19 +202,44 @@
  *      the new-line character
  * */
 
+class Token {
+    enum token_type {
+        identifier,
+        punc
+    };
+    token_type type;
+    std::istream::streampos pos;
+    unsigned long length;
+};
+
+
+
+class Preprocessor;
+
 class FileContext {
 private:
     bool isFile;
     std::string path;
     std::istream *istream;
+    Preprocessor &preprocessor;
+    int peek;
+
+    void advance();
+    bool match(char c, bool trim = true);
+    bool match(const std::string &str, bool trim = true);
+    void skipSpace();
 public:
-    FileContext(std::istream &i);
-    FileContext(std::string &p);
+    FileContext(Preprocessor &pp, std::istream &i);
+    FileContext(Preprocessor &pp, std::string &p);
+    std::string resolveFile(std::string &path);
+    void parseGroup();
 };
 
 class Preprocessor {
 private:
     FileContext fileContext;
+    std::vector<std::string> includePaths;
+    int line, col;
 public:
     Preprocessor(std::istream &i);
     Preprocessor(std::string &p);
