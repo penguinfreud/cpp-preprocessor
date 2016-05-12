@@ -28,3 +28,10 @@ h(a)
 #define j 1,2
 #define k(x, y) x foo y
 i(j)
+g2(^s#  0\, *- sa:_ $)
+g2([(]0), ((}}1)){)
+g2( , )
+#define l() 0
+l( )
+#define m(a, ...) a + __VA_ARGS__
+m(1, 2, 3)

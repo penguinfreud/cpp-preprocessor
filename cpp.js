@@ -1,4 +1,5 @@
 var hasOwnProperty = Object.prototype.hasOwnProperty;
+var push = Array.prototype.push;
 var unshift = Array.prototype.unshift;
 
 var i = 0;
@@ -10,7 +11,7 @@ var PP_PUNCS = [
 ">=", "&&", "||", "++", "--", "->", "{", "}", "[",
 "]", "#", "(", ")", ";", ":", "?", ".", "+", "-",
 "*", "/", "%", "^", "&", "|", "~", "!", "=", "<", ">", ","];
-var NON_MACRO_NAMES = ["defined", "and", "and_eq", "bitand", "bitor", "compl", "not", "not_eq", "or", "or_eq", "xor", "xor_eq"];
+var NON_MACRO_NAMES = ["defined", "__VA_ARGS__", "and", "and_eq", "bitand", "bitor", "compl", "not", "not_eq", "or", "or_eq", "xor", "xor_eq"];
 
 function extend(base, extension) {
     for (var key in extension) {
@@ -43,7 +44,7 @@ TokenStream.prototype = {
     
     next: function () {
         if (this.buffer.length > 0) {
-            return buffer.shift();
+            return this.buffer.shift();
         } else {
             return this._next();
         }
@@ -55,20 +56,35 @@ TokenStream.prototype = {
         } else {
             var token = this._next();
             this.buffer.push(token);
-            return token
+            return token;
         }
     },
     
     _next: function () {},
     
-    space: function () {
+    space: function (allowNewLine) {
         var token = this.next();
-        if (token.type === WHITESPACE) {
-            return token;
+        if (!token) {
+            return null;
+        } else if (token.type === WHITESPACE) {
+            if (allowNewLine === false && token.hasNewLine) {
+                this.buffer.unshift(token);
+                return null;
+            } else {
+                return token;
+            }
         } else {
-            buffer.unshift(token);
+            this.buffer.unshift(token);
             return null;
         }
+    },
+    
+    expectNewLine: function () {
+        var token = this.next();
+        if (token && (token.type !== WHITESPACE || !token.hasNewLine)) {
+            throw new Error("expected new line");
+        }
+        return token;
     },
     
     matchPunc: function (value) {
@@ -76,8 +92,17 @@ TokenStream.prototype = {
         if (token && token.type === PUNC && token.value === value) {
             return token;
         } else {
-            buffer.unshift(token);
+            this.buffer.unshift(token);
             return null;
+        }
+    },
+    
+    expectPunc: function (value) {
+        var token = this.next();
+        if (token && token.type === PUNC && token.value === value) {
+            return token;
+        } else {
+            throw new Error("expected " + value);
         }
     },
     
@@ -86,16 +111,36 @@ TokenStream.prototype = {
         if (token && token.type === IDENTIFIER && token.value === value) {
             return token;
         } else {
-            buffer.unshift(token);
+            this.buffer.unshift(token);
             return null;
         }
     },
     
     expectId: function () {
         var token = this.next();
-        if (token.type !== IDENTIFIER)
+        if (token && token.type === IDENTIFIER) {
+            return token;
+        } else {
             throw new Error("expected identifier");
-        return token;
+        }
+    },
+    
+    print: function (out) {
+        var prev = null;
+        while (token = this.next()) {
+            if (prev) {
+                if (prev.type === NUMBER &&
+                        /^([0-9A-Za-z_\.]|'[0-9A-Za-z_])/.test(token.value) ||
+                    prev.type === IDENTIFIER &&
+                        /^[0-9A-Za-z_]/.test(token.value) ||
+                    prev.type === PUNC &&
+                        (PP_PUNCS.indexOf(prev.value + token.value.substr(0, 1)) >= 0 ||
+                        PP_PUNCS.indexOf(prev.value + token.value.substr(0, 2)) >= 0 )) {
+                    out(" ");
+                }
+            }
+            out(token.value);
+        }
     }
 };
 
@@ -104,7 +149,7 @@ function Tokenizer() {}
 
 Tokenizer.prototype = new TokenStream();
 
-extend(Tokenizer.prototype, {    
+extend(Tokenizer.prototype, {
     text: "",
     pos: 0,
     length: 0,
@@ -163,6 +208,22 @@ extend(Tokenizer.prototype, {
                 s += c;
                 hasNewLine = true;
                 this.pos++;
+            } else if (c === "\\") {
+                c = this.text.charAt(this.pos + 1);
+                if (c === "\r") {
+                    if (this.text.charAt(this.pos + 2) === "\n") {
+                        this.pos += 3;
+                        s += " ";
+                    } else {
+                        this.pos += 2;
+                        s += " ";
+                    }
+                } else if (c === "\n") {
+                    this.pos += 2;
+                    s += " ";
+                } else {
+                    break;
+                }
             } else {
                 break;
             }
@@ -453,65 +514,155 @@ extend(Tokenizer.prototype, {
     }
 });
 
-function MacroExpansionStream() {}
+function MacroExpander() {}
 
-MacroExpansionStream.prototype = new TokenStream();
+MacroExpander.prototype = new TokenStream();
 
-extend(MacroExpansionStream.prototype, {
+extend(MacroExpander.prototype, {
     input: null,
     macroTable: null,
-    expandingStream: null,
+    expander: null,
+    stack: null,
     
-    init: function (input, macroTable) {
+    init: function (input, macroTable, stack) {
+        TokenStream.prototype.init.call(this);
         this.input = input;
         this.macroTable = macroTable;
+        this.expander = null;
+        this.stack = stack || [];
+    },
+    
+    expandObjectLikeMacro: function (macro) {
+        if (macro.body.length > 0) {
+            var stream = new TokenStream();
+            stream.buffer = macro.body;
+            var expander = new MacroExpander();
+            expander.init(stream, this.macroTable, this.stack.concat(macro.name));
+            this.expander = expander;
+        }
+        return this._next();
+    },
+    
+    expandFunctionLikeMacro: function (name, macro) {
+        var args = [], curArg = [];
+        var input = this.input, depth, token = input.space();
+        if (input.matchPunc("(")) {
+            depth = 0;
+            var stream = new TokenStream();
+            var expander = new MacroExpander();
+            expander.init(stream, this.macroTable, this.stack);
+            while (!input.finished()) {
+                if (token = input.matchPunc(")")) {
+                    if (depth === 0) {
+                        stream.buffer = curArg;
+                        expander.init(stream, this.macroTable);
+                        curArg = [];
+                        while (token = expander.next()) {
+                            curArg.push(token);
+                        }
+                        args.push(curArg);
+                        
+                        stream.buffer = this.substituteArgs(macro.body, this.matchArgs(macro.params, args));
+                        expander.init(stream, this.macroTable, this.stack.concat(macro.name));
+                        this.expander = expander;
+                        return this._next();
+                    } else {
+                        depth--;
+                        curArg.push(token);
+                    }
+                } else if (token = input.matchPunc("(")) {
+                    depth++;
+                    curArg.push(token);
+                } else if (depth === 0 && input.matchPunc(",")) {
+                    stream.buffer = curArg;
+                    expander.init(stream, this.macroTable);
+                    curArg = [];
+                    while (token = expander.next()) {
+                        curArg.push(token);
+                    }
+                    args.push(curArg);
+                } else {
+                    curArg.push(input.next());
+                }
+            }
+        } else {
+            this.buffer.unshift(token);
+            return name;
+        }
+    },
+    
+    matchArgs: function (params, args) {
+        var i, l = params.length, argsTable = {};
+        if (params[l-1] === "__VA_ARGS__") {
+            if (args.length >= l-1) {
+                var __VA_ARGS__ = [];
+                for (i = l-1; i<args.length; i++) {
+                    if (i > l-1) {
+                        __VA_ARGS__.push({
+                            type: PUNC,
+                            value: ",",
+                            pos: 0,
+                            length: 1
+                        });
+                    }
+                    push.apply(__VA_ARGS__, args[i]);
+                }
+                args[l-1] = __VA_ARGS__;
+            } else {
+                throw new Error("expected at least " + (l-1) + " arguments, but got " + args.length);
+            }
+        } else if (l === 0 && args.length === 1 && args[0].type === WHITESPACE) {
+            return argsTable;
+        } else if (args.length !== l) {
+            throw new Error("expected " + l + " arguments, but got " + args.length);
+        }
+        for (i = 0; i<l; i++) {
+            argsTable[params[i]] = args[i];
+        }
+        return argsTable;
+    },
+    
+    substituteArgs: function (body, args) {
+        var replacedBody = [], i, l = body.length, token;
+        for (i = 0; i<l; i++) {
+            token = body[i];
+            if (token.type === IDENTIFIER && hasOwnProperty.call(args, token.value)) {
+                push.apply(replacedBody, args[token.value]);
+            } else {
+                replacedBody.push(token);
+            }
+        }
+        return replacedBody;
     },
     
     expandMacro: function (name) {
-        var input = this.input, stream, token;
+        var input = this.input, macro, arg;
         
-        if (hasOwnProperty.call(this.macroTable, name.value)) {
-            var macro = this.macroTable[name.value];
+        if (name.value === "__VA_ARGS") {
+            throw new Error("unexpected __VA_ARGS__");
+        }
+        
+        if (hasOwnProperty.call(this.macroTable, name.value) &&
+            this.stack.indexOf(name.value) === -1) {
+            macro = this.macroTable[name.value];
             if (!macro.isFunctionLike) {
-                if (macro.body.length === 0) {
-                    return this._next();
-                }
-                stream = new TokenStream();
-                stream.buffer = macro.body;
-                this.expandingStream = new MacroExpansionStream();
-                this.expandingStream.init(stream, this.macroTable);
-                token = this.expandingStream.next();
-                if (token === null) {
-                    return this._next();
-                }
+                return this.expandObjectLikeMacro(macro);
             } else {
-                var buffer = [], params = [];
-                if (token = input.space()) {
-                    buffer.push(token);
-                }
-                if (token = input.matchPunc("(")) {
-                    buffer.push(token);
-                    while (!input.finished()) {
-                        if (input.matchPunc(")")) {
-                            var newMacroTable = Object.create(this.macroTable);
-                        }
-                    }
-                    unshift.apply(input, buffer);
-                } else {
-                    unshift.apply(input, buffer);
-                }
+                return this.expandFunctionLikeMacro(name, macro);
             }
         }
-        return token;
+        return name;
     },
     
     _next: function () {
-        var expandingStream = this.expandingStream;
-        if (expandingStream !== null) {
-            if (expandingStream.finished()) {
-                this.expandingStream = null;
+        var expander = this.expander;
+        var token;
+        if (expander !== null) {
+            token = this.expander.next();
+            if (token === null) {
+                this.expander = null;
             } else {
-                return this.expandingStream.next();
+                return token;
             }
         }
         
@@ -527,52 +678,239 @@ extend(MacroExpansionStream.prototype, {
     }
 });
 
-function FileStream() {}
+function truncateNewLine(token) {
+    var space = token.value.match(/(\r\n|\r|\n)[^\r\n]*$/)[0];
+    return {
+        type: WHITESPACE,
+        value: space,
+        pos: token.pos + token.length - space.length,
+        length: space.length,
+        hasNewLine: true
+    };
+}
 
-FileStream.prototype = new MacroExpansionStream();
+function FilePreprocessor() {}
 
-extend(FileStream.prototype, {
-    tokenizer: null,
+FilePreprocessor.prototype = new MacroExpander();
+
+extend(FilePreprocessor.prototype, {
     macroTable: null,
+    ifStack: null,
 
     init: function (content, macroTable) {
         var tokenizer = new Tokenizer();
         tokenizer.init(content);
-        MacroExpansionStream.prototype.init.call(tokenizer, macroTable);
+        MacroExpander.prototype.init.call(this, tokenizer, macroTable);
+        this.ifStack = [];
+    },
+    
+    skipUntilNewLine: function () {
+        var token;
+        while (token = this.input.next()) {
+            if (token.type === WHITESPACE && token.hasNewLine) {
+                return true;
+            }
+        }
+        return false;
+    },
+    
+    untilNewLine: function (allowVAARGS) {
+        var tokens = [], input = this.input, token;
+        while (token = input.next()) {
+            if (token.type === WHITESPACE && token.hasNewLine) {
+                input.buffer.unshift(token);
+                return tokens;
+            } else if (allowVAARGS === false && token.type === IDENTIFIER && token.value === "__VA_ARGS__") {
+                throw new Error("unexpected __VA_ARGS__");
+            } else {
+                tokens.push(token);
+            }
+        }
+        if (tokens.length > 0 && tokens[tokens.length - 1].type === WHITESPACE) {
+            tokens.pop();
+        }
+        return tokens;
+    },
+    
+    parseFunctionMacroTail: function (name, params, allowVAARGS) {
+        var body = this.untilNewLine(false);
+        var macro = new FunctionMacro();
+        macro.init(name, params, body);
+        this.macroTable[name] = macro;
+        return this.input.expectNewLine();
     },
     
     parseDefine: function () {
+        var input = this.input, token, name, body, macro;
+        token = input.expectId();
+        name = token.value;
+        if (NON_MACRO_NAMES.indexOf(name) >= 0) {
+            throw new Error("Invalid macro name: " + name);
+        }
+        if (input.matchPunc("(")) {
+            var first = true, params = [];
+            while (!input.finished()) {
+                input.space(false);
+                if (input.matchPunc(")")) {
+                    return this.parseFunctionMacroTail(name, params, false);
+                } else {
+                    if (first) {
+                        first = false;
+                    } else {
+                        input.expectPunc(",");
+                        input.space(false);
+                    }
+                    if (input.matchPunc("...")) {
+                        params.push("__VA_ARGS__");
+                        input.space(false);
+                        input.expectPunc(")");
+                        return this.parseFunctionMacroTail(name, params, true);
+                    } else {
+                        token = input.expectId();
+                        params.push(token.value);
+                    }
+                }
+            }
+            throw new Error("expected )");
+        } else {
+            token = input.space(false);
+            if (!token) {
+                throw new Error("expected space");
+            }
+            body = this.untilNewLine();
+            macro = new Macro();
+            macro.init(name, body);
+            this.macroTable[name] = macro;
+            return input.expectNewLine();
+        }
+    },
+    
+    parseCondition: function () {
         
     },
     
-    parseIf: function () {
-    
+    parseIf: function (skip) {
+        input.space(false);
+        var cond = this.parseCondition(),
+        token = this.input.expectNewLine();
+        
+        if (skip) return this.skipIfElseClauses(1);
+        if (cond) {
+            this.ifStack.push(1);
+            return truncateNewLine(token);
+        } else {
+            return this.skipIfElseClauses(2);
+        }
     },
     
-    parseIfdef: function () {
+    parseIfdef: function (negate, skip) {
+        var input = this.input, token, name, ifStack = this.ifStack;
+        
+        input.space(false);
+        name = input.expectId().value;
+        token = input.expectNewLine();
+        
+        if (skip) return this.skipIfElseClauses(1);
+        if (hasOwnProperty.call(this.macroTable, name) == !negate) {
+            ifStack.push(1);
+            return truncateNewLine(token);
+        } else {
+            return this.skipIfElseClauses(2);
+        }
+    },
     
+    skipIfElseClauses: function (level) {
+        var token, input = this.input, cond;
+        while (true) {
+            if (input.matchPunc("#")) {
+                input.space(false);
+                if (input.matchId("if")) {
+                    this.parseIf(true);
+                } else if (input.matchId("ifdef") || input.matchId("ifndef")) {
+                    this.parseIfdef(true, true);
+                } else if (input.matchId("else")) {
+                    if (level === 0) {
+                        throw new Error("unexpected #elif");
+                    }
+                    token = input.expectNewLine();
+                    if (level === 2) {
+                        this.ifStack.push(2);
+                        return truncateNewLine(token);
+                    }
+                } else if (input.matchId("elif")) {
+                    if (level === 0) {
+                        throw new Error("unexpected #elif");
+                    }
+                    input.space(false);
+                    cond = this.parseCondition();
+                    token = input.expectNewLine();
+                    if (level === 2 && cond) {
+                        this.ifStack.push(1);
+                        return truncateNewLine(token);
+                    }
+                } else if (input.matchId("endif")) {
+                    return truncateNewLine(input.expectNewLine());
+                } else {
+                    this.skipUntilNewLine();
+                }
+            } else if (!this.skipUntilNewLine()) {
+                return null;
+            }
+        }
     },
     
     _next: function () {
-        var tokenizer = this.tokenzier, token;
-        if (tokenzier.finished())
+        var expander = this.expander, token, input;
+        if (expander !== null) {
+            token = this.expander.next();
+            if (token === null) {
+                this.expander = null;
+            } else {
+                return token;
+            }
+        }
+        
+        input = this.input;
+        if (input.finished())
             return null;
-        var token = tokenizer.space();
+        token = input.space();
         if (token)
             return token;
         
-        if (tokenizer.matchPunc("#")) {
-            tokenizer.space();
-            if (tokenizer.matchId("define")) {
-                tokenizer.space();
-                this.parseDefine();
-            } else if (tokenizer.matchId("if")) {
-                this.parseIf();
-            } else if (tokenizer.matchId("ifdef")) {
-                this.parseIfdef();
+        if (input.matchPunc("#")) {
+            input.space(false);
+            if (input.matchId("define")) {
+                input.space(false);
+                return this.parseDefine();
+            } else if (input.matchId("if")) {
+                return this.parseIf();
+            } else if (input.matchId("ifdef")) {
+                return this.parseIfdef();
+            } else if (input.matchId("ifndef")) {
+                return this.parseIfdef(true);
+            } else if (input.matchId("elif")) {
+                if (this.ifStack.length === 0 || this.ifStack.pop() !== 1) {
+                    throw new Error("unexpected #elif");
+                }
+                this.parseCondition();
+                input.expectNewLine();
+                return this.skipIfElseClauses(1);
+            } else if (input.matchId("else")) {
+                if (this.ifStack.length === 0 || this.ifStack.pop() !== 1) {
+                    throw new Error("unexpected #else");
+                }
+                input.expectNewLine();
+                return this.skipIfElseClauses(0);
+            } else if (input.matchId("endif")) {
+                if (this.ifStack.length === 0) {
+                    throw new Error("unexpected #endif");
+                }
+                this.ifStack.pop();
+                token = input.expectNewLine();
+                return truncateNewLine(token);
             }
         } else {
-            token = tokenizer.next();
+            token = input.next();
             if (token && token.type === IDENTIFIER) {
                 return this.expandMacro(token);
             } else {
@@ -624,6 +962,22 @@ exports.tokenTypes = {
 
 exports.TokenStream = TokenStream;
 exports.Tokenizer = Tokenizer;
+exports.MacroExpander = MacroExpander;
+exports.FilePreprocessor = FilePreprocessor;
+exports.Macro = Macro;
+exports.FunctionMacro = FunctionMacro;
+
+if (typeof require === "function") {
+    var fs = require("fs");
+    exports.processFile = function (path) {
+        var content = fs.readFileSync(path);
+        var fp = new FilePreprocessor();
+        fp.init(content, {});
+        fp.print(function (str) {
+            process.stdout.write(str);
+        });
+    };
+}
 
 function assert(cond, msg) {
     if (!cond)
@@ -669,5 +1023,39 @@ function testTokenizer() {
     assert(tok.type === STRING);
     assert(tok.value === "u8R\"/*(\nfoo)/*\"");
     assert(t.next() === null);
+}
+
+function testMacroExpansion() {
+    var stream = new Tokenizer();
+    stream.init("foo");
+    
+    var macro = new Macro();
+    macro.init("foo", [{
+        type: NUMBER,
+        value: "123",
+        pos: 0,
+        length: 3
+    }]);
+    
+    var expander = new MacroExpander();
+    expander.init(stream, {
+        foo: macro
+    });
+    
+    var token = expander.next();
+    assert(token.type === NUMBER);
+    assert(token.value === "123");
+    assert(expander.next() === null);
+}
+
+function testFile() {
+    var content = "#define a(x) b(x) + 1\n#define b(x) x + 2\na(0)\na (0)\nb(b(0))\n#define c(x) c(x + 1)\nc(0)\n\nconst int x = 1;\n#if x\nfoo\n#endif\n\n#define e \\\\\nfoo\ne\n\n#define f (0)\n#define g() a\ng()f\n#define g2(x, y) x y\ng2(g(), f)\n\n#define h(x) x(0)\nh(a)\n\n#define i(x) k(x)\n#define j 1,2\n#define k(x, y) x foo y\ni(j)\ng2(^s#  0\\, *- sa:_ $)\ng2([(]0), ((}}1)){)\ng2( , )\n#define l() 0\nl( )\n#define m(a, ...) a + __VA_ARGS__\nm(1, 2, 3)\n";
+    var fp = new FilePreprocessor();
+    var buffer = [];
+    fp.init(content, {});
+    fp.print(function (str) {
+        buffer.push(str);
+    });
+    console.log(buffer.join(""));
 }
 
