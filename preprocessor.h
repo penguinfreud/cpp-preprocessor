@@ -3,7 +3,10 @@
 
 #include <istream>
 #include <vector>
+#include <deque>
+#include <memory>
 
+namespace cpp {
 /*
  * C++ Preprocessor Grammar
  *
@@ -202,48 +205,284 @@
  *      the new-line character
  * */
 
-class Token {
-    enum token_type {
-        identifier,
-        punc
+
+    typedef std::istream::streampos pos_t;
+
+    const int PP_PUNCS_COUNT = 57;
+    char PP_PUNCS[PP_PUNCS_COUNT][4] = {
+            "->*", "%:%", "...", ">>=", "<<=", "##", "<:", ":>",
+            "<%", "%>", "%:", "::", ".*", "+=", "-=", "*=", "/=",
+            "%=", "^=", "&=", "|=", "<<", ">>", "==", "!=", "<=",
+            ">=", "&&", "||", "++", "--", "->", "{", "}", "[",
+            "]", "#", "(", ")", ";", ":", "?", ".", "+", "-",
+            "*", "/", "%", "^", "&", "|", "~", "!", "=", "<", ">", ","
     };
-    token_type type;
-    std::istream::streampos pos;
-    unsigned long length;
-};
 
+    class PosInfo {
+    public:
+        PosInfo(const std::string &f): file(f), line(1), col(0), pos(0) {}
+        std::string file;
+        int line, col;
+        unsigned long pos;
+    };
 
+    class Token {
+    public:
+        enum token_type {
+            WHITESPACE,
+            IDENTIFIER,
+            NUMBER,
+            CHARACTER,
+            STRING,
+            PUNC
+        };
 
-class Preprocessor;
+        Token(token_type t, const std::string &v, const PosInfo &posInfo, bool nl = false):
+                _type(t), _value(v), _file(posInfo.file), _line(posInfo.line), _col(posInfo.col), _pos(posInfo.pos), _hasNewLine(nl) { }
 
-class FileContext {
-private:
-    bool isFile;
-    std::string path;
-    std::istream *istream;
-    Preprocessor &preprocessor;
-    int peek;
+        token_type type() {
+            return _type;
+        }
 
-    void advance();
-    bool match(char c, bool trim = true);
-    bool match(const std::string &str, bool trim = true);
-    void skipSpace();
-public:
-    FileContext(Preprocessor &pp, std::istream &i);
-    FileContext(Preprocessor &pp, std::string &p);
-    std::string resolveFile(std::string &path);
-    void parseGroup();
-};
+        const std::string &value() {
+            return _value;
+        }
 
-class Preprocessor {
-private:
-    FileContext fileContext;
-    std::vector<std::string> includePaths;
-    int line, col;
-public:
-    Preprocessor(std::istream &i);
-    Preprocessor(std::string &p);
-    void preprocess();
-};
+        bool hasNewLine() {
+            return _hasNewLine;
+        }
+
+        const std::string &file() {
+            return _file;
+        }
+
+        int line() {
+            return _line;
+        }
+
+        int col() {
+            return _col;
+        }
+
+        const pos_t &pos() {
+            return _pos;
+        }
+
+    private:
+        token_type _type;
+        std::string _file, _value;
+        pos_t _pos;
+        int _line, _col;
+        bool _hasNewLine;
+    };
+
+    typedef std::shared_ptr<Token> token_t;
+
+    class Macro {
+    public:
+        Macro(const std::string &n):
+                _name(n), _body() { }
+
+        const std::string &name() {
+            return _name;
+        }
+
+        void addToken(const std::shared_ptr<Token> token) {
+            _body.push_back(token);
+        }
+    private:
+        bool isFunctionLike;
+        std::string _name;
+        std::deque<std::shared_ptr<Token>> _body;
+    };
+
+    class FunctionMacro: public Macro {
+        FunctionMacro(const std::string &n):
+                Macro(n), _params() { }
+
+        void addParam(const std::string param) {
+            _params.push_back(param);
+        }
+    private:
+        std::deque<std::string> _params;
+    };
+
+    class TokenStream {
+    public:
+        TokenStream():
+                buffer() {}
+
+        bool finished() {
+            return buffer.empty() && _finished();
+        }
+
+        virtual bool _finished() {
+            return true;
+        }
+
+        token_t next() {
+            if (buffer.empty()) {
+                return _next();
+            } else {
+                auto token = buffer[0];
+                buffer.pop_front();
+                return token;
+            }
+        }
+
+        virtual token_t _next() {
+            return token_t();
+        }
+
+        void unget(token_t token) {
+            buffer.push_front(token);
+        }
+
+        token_t space(bool allowNewLine) {
+            auto token = next();
+            if (!token)
+                return token;
+            else if (token->type() != Token::WHITESPACE ||
+                        (!allowNewLine && token->hasNewLine())) {
+                unget(token);
+                return token_t();
+            } else {
+                return token;
+            }
+        }
+
+        token_t expectNewLine() {
+            auto token = next();
+            if (token && (token->type() != Token::WHITESPACE || !token->hasNewLine()))
+                throw "Expected new line";
+            return token;
+        }
+
+        token_t match(Token::token_type type, const std::string &v) {
+            auto token = next();
+            if (token && token->type() == type && token->value() == v) {
+                return token;
+            } else {
+                unget(token);
+                return token_t();
+            }
+        }
+
+        token_t expect(Token::token_type type, const std::string &v) {
+            auto token = next();
+            if (token && token->type() == type && token->value() == v) {
+                return token;
+            } else {
+                throw "Expected " + v;
+            }
+        }
+
+        token_t matchPunc(const std::string &v) {
+            return match(Token::PUNC, v);
+        }
+
+        token_t expectPunc(const std::string &v) {
+            return expect(Token::PUNC, v);
+        }
+
+        token_t matchId(const std::string &v) {
+            return match(Token::IDENTIFIER, v);
+        }
+
+        token_t expectId(const std::string &v) {
+            return expect(Token::IDENTIFIER, v);
+        }
+
+        void print(std::ostream os) {
+            auto prev = token_t();
+            while (auto token = next()) {
+                if (prev) {
+                    if (prev->type() == Token::NUMBER ||
+                            prev->type() == Token::IDENTIFIER ||
+                            prev-> type() == Token::PUNC) {
+                        os << ' ';
+                    }
+                }
+                os << token->value();
+            }
+        }
+    private:
+        std::deque<token_t> buffer;
+    };
+
+    class Tokenizer: public TokenStream {
+    public:
+        Tokenizer(std::istream &i, const std::string &f): input(i), buffer(), pos(f), startPos(f), hasReturn(false) {}
+
+        virtual bool _finished() {
+            return input.eof();
+        }
+
+        void spliceLine();
+
+        void advance();
+
+        int match(int c, bool output = true) {
+            if (input.peek() == c) {
+                advance();
+                if (output)
+                    buffer << (char) c;
+                return c;
+            } else {
+                return 0;
+            }
+        }
+
+        bool match(const std::string &s, bool output = true);
+
+        token_t parseSpace();
+        token_t parseId();
+        token_t parseNumber();
+        token_t parsePunc();
+        void parseEscape();
+        token_t parseCharSequence(char quote, Token::token_type type);
+        token_t parseRawString();
+    private:
+        void startToken() {
+            startPos = pos;
+            buffer.str("");
+        }
+
+        void newLine() {
+            pos.line++;
+            pos.col = 0;
+        }
+
+        bool isIdChar(int c) {
+            return isdigit(c) || isalpha(c) || c == '_';
+        }
+
+        void hex() {
+            int c = input.peek();
+            if (c >= '0' && c <= '9' ||
+                    c >= 'A' && c <= 'F' ||
+                    c >= 'a' && c <= 'f') {
+                advance();
+                buffer << (char) c;
+            } else {
+                throw "Expected hexadecimal digit";
+            }
+        }
+
+        void oct() {
+            int c = input.peek();
+            if (c >= '0' && c <= '7') {
+                advance();
+                buffer << (char) c;
+            }
+        }
+
+        std::istream &input;
+        std::stringstream buffer;
+        PosInfo pos;
+        PosInfo startPos;
+        bool hasReturn;
+    };
+}
 
 #endif

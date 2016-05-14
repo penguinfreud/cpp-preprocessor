@@ -159,76 +159,94 @@ extend(Tokenizer.prototype, {
         this.text = text;
         this.length = text.length;
         this.pos = 0;
+        this.spliceLine();
     },
     
     finished: function () {
         return this.pos >= this.length;
     },
     
+    spliceLine: function () {
+        if (this.text.charAt(this.pos) === "\\") {
+            var c = this.text.charAt(this.pos + 1);
+            if (c === "\r") {
+                if (this.text.charAt(this.pos + 2) === "\n") {
+                    this.pos += 3;
+                } else {
+                    this.pos += 2;
+                }
+            } else if (c === "\n") {
+                this.pos += 2;
+            }
+        }
+    },
+    
+    advance: function () {
+        this.pos++;
+        this.spliceLine();
+    },
+    
+    match: function (str) {
+        var i, l = str.length, p = this.pos;
+        for (i = 0; i<l; i++) {
+            if (this.text.charAt(this.pos) === str.charAt(i)) {
+                this.advance();
+            } else {
+                this.pos = p;
+                return false;
+            }
+        }
+        return true;
+    },
+    
     parseSpace: function () {
         var s = "", p = this.pos, c,
             hasNewLine = false;
         while (this.pos < this.length) {
-            c = this.text.charAt(this.pos);
-            if (c == "/") {
-                c = this.text.charAt(this.pos + 1);
-                if (c === "*") {
-                    this.pos += 2;
-                    s += " ";
-                    while (this.pos < this.length) {
-                        c = this.text.charAt(this.pos);
-                        if (c === "*") {
-                            c = this.text.charAt(++this.pos);
-                            if (c == "/") {
-                                ++this.pos;
-                                break;
-                            }
-                        } else {
-                            this.pos++;
-                        }
+            if (this.match("/*")) {
+                s += " ";
+                while (!this.match("*/")) {
+                    if (this.pos >= this.length) {
+                        throw new Error("Unterminated comment");
                     }
-                } else if (c === "/") {
-                    this.pos += 2;
-                    s += " ";
-                    while (this.pos < this.length) {
-                        c = this.text.charAt(this.pos);
-                        if (c === "\r" || c === "\n") {
-                            break;
-                        } else {
-                            this.pos++;
-                        }
-                    }
-                } else {
-                    break;
+                    this.advance();
                 }
-            } else if (c === " " || c === "\t") {
-                s += c;
-                this.pos++;
-            } else if (c === "\r" || c === "\n") {
-                s += c;
-                hasNewLine = true;
-                this.pos++;
-            } else if (c === "\\") {
-                c = this.text.charAt(this.pos + 1);
-                if (c === "\r") {
-                    if (this.text.charAt(this.pos + 2) === "\n") {
-                        this.pos += 3;
-                        s += " ";
-                    } else {
-                        this.pos += 2;
-                        s += " ";
+            } else if (this.match("//")) {
+                s += " ";
+                while (true) {
+                    if (this.pos >= this.length) {
+                        throw new Error("Unterminated comment");
                     }
-                } else if (c === "\n") {
-                    this.pos += 2;
-                    s += " ";
-                } else {
-                    break;
+                    c = this.text.charAt(this.pos);
+                    if (c === "\r" || c === "\n")
+                        break;
+                    this.advance();
                 }
             } else {
-                break;
+                c = this.text.charAt(this.pos);
+                if (c === "\r") {
+                    hasNewLine = true;
+                    if (this.text.charAt(this.pos + 1) === "\n") {
+                        this.pos += 2;
+                        s += "\r\n";
+                        this.spliceLine();
+                    } else {
+                        s += "\r";
+                        this.advance();
+                    }
+                } else if (c === "\n") {
+                    hasNewLine = true;
+                    s += c;
+                    this.advance();
+                } else if (c === " " || c === "\t") {
+                    s += c;
+                    this.advance();
+                } else {
+                    break;
+                }
             }
         }
-        if (this.pos > p) {
+        if (s.length > 0) {
             return {
                 type: WHITESPACE,
                 value: s,
@@ -242,14 +260,19 @@ extend(Tokenizer.prototype, {
     },
     
     parseIdent: function () {
-        var p = this.pos;
-        var c = this.text.charAt(++this.pos);
-        while (isAlpha(c) || isDigit(c) || c === "_") {
-            c = this.text.charAt(++this.pos);
+        var p = this.pos, c, id = "";
+        while (this.pos < this.length) {
+            c = this.text.charAt(this.pos);
+            if (isAlpha(c) || isDigit(c) || c === "_")  {
+                id += c;
+                this.advance();
+            } else {
+                break;
+            }
         }
         var token = {
             type: IDENTIFIER,
-            value: this.text.substring(p, this.pos),
+            value: id,
             pos: p,
             length: this.pos - p
         };
@@ -259,41 +282,45 @@ extend(Tokenizer.prototype, {
     parseNumber: function () {
         var text = this.text,
         p = this.pos,
-        c = text.charAt(this.pos);
+        c = text.charAt(this.pos),
+        v = "";
         if (c === ".") {
-            if (isDigit(text.charAt(this.pos+1))) {
-                this.pos += 2;
+            v += c;
+            this.advance();
+            c = text.charAt(this.pos);
+            if (isDigit(c)) {
+                v += c;
+                this.advance();
             } else {
-                return {
-                    type: ERROR,
-                    value: "expected digit",
-                    pos: p,
-                    length: 0
-                };
+                this.pos = p;
+                return this.parsePunc();
             }
         } else if (isDigit(c)) {
-            this.pos++;
+            v += c;
+            this.advance();
         } else {
-            return {
-                type: ERROR,
-                value: "expected digit",
-                pos: p,
-                length: 0
-            };
+            throw new Error("Expected digit");
         }
         while (this.pos < this.length) {
             c = text.charAt(this.pos);
             if (c === "E" || c === "e") {
-                c = text.charAt(++this.pos);
+                v += c;
+                this.advance();
+                c = text.charAt(this.pos);
                 if (c === "+" || c === "-") {
-                    this.pos++;
+                    v += c;
+                    this.advance();
                 }
             } else if (isDigit(c) || isAlpha(c) || c === "_" || c === ".") {
-                this.pos++;
+                v += c;
+                this.advance();
             } else if (c === "'") {
-                c = text.charAt(++this.pos);
+                v += "'";
+                this.advance();
+                c = text.charAt(this.pos);
                 if (isDigit(c) || isAlpha(c) || c === "_") {
-                    this.pos++;
+                    v += c;
+                    this.advance();
                 } else {
                     throw new Error("unexpected");
                 }
@@ -303,21 +330,11 @@ extend(Tokenizer.prototype, {
         }
         var token = {
             type: NUMBER,
-            value: text.substring(p, this.pos),
+            value: v,
             pos: p,
             length: this.pos - p
         };
         return token;
-    },
-    
-    match: function (str) {
-        var l = str.length;
-        if (this.text.substr(this.pos, l) === str) {
-            this.pos += l;
-            return true;
-        } else {
-            return false;
-        }
     },
     
     parsePunc: function () {
@@ -333,7 +350,7 @@ extend(Tokenizer.prototype, {
                 };
             }
         }
-        this.pos++;
+        this.advance();
         return {
             type: PUNC,
             value: this.text.charAt(p),
@@ -344,46 +361,55 @@ extend(Tokenizer.prototype, {
     
     hex: function () {
         var c = this.text.charAt(this.pos);
-        if (c >= "0" && c <= "0" || c >= "A" && c <= "F" || c >= "a" && c <= "f") {
-            this.pos++;
+        if (c >= "0" && c <= "9" || c >= "A" && c <= "F" || c >= "a" && c <= "f") {
+            this.advance();
+            return c;
         } else {
             throw new Error("expected hexadecimal digit");
         }
     },
     
     parseEscape: function () {
-        var c = this.text.charAt(this.pos);
+        var c = this.text.charAt(this.pos), s = "";
         if (c === "'" || c === "\"" || c === "?" || c === "\\" ||
             c === "a" || c === "b" || c === "f" || c === "n" || c === "r" || c === "t" || c === "v") {
-            this.pos++;
+            this.advance();
+            s = c;
         } else if (c === "x" || c === "u") {
-            this.pos++;
-            this.hex();
-            this.hex();
-            this.hex();
-            this.hex();
+            this.advance;
+            s += this.hex();
+            s += this.hex();
+            s += this.hex();
+            s += this.hex();
         } else if (c === "U") {
-            this.hex();
-            this.hex();
-            this.hex();
-            this.hex();
-            this.hex();
-            this.hex();
-            this.hex();
-            this.hex();
+            this.advance();
+            s += this.hex();
+            s += this.hex();
+            s += this.hex();
+            s += this.hex();
+            s += this.hex();
+            s += this.hex();
+            s += this.hex();
+            s += this.hex();
         } else if (c >= "0" && c <= "7") {
-            c = this.text.charAt(++this.pos);
+            s += c;
+            this.advance();
+            c = this.text.charAt(this.pos);
             if (c >= "0" && c <= "7") {
-                c = this.text.charAt(++this.pos);
+                s += c;
+                this.advance();
+                c = this.text.charAt(this.pos);
                 if (c >= "0" && c <= "7") {
-                    ++this.pos;
+                    s += c;
+                    this.advance();
                 }
             }
         }
+        return s;
     },
     
     parseCharSequence: function (quote, type, prefix) {
-        var p = this.pos, c = this.text.charAt(this.pos);
+        var p = this.pos, c = this.text.charAt(this.pos), s = "";
         if (c !== quote) {
             return {
                 type: ERROR,
@@ -392,24 +418,28 @@ extend(Tokenizer.prototype, {
                 length: 0
             };
         }
-        this.pos++;
+        s += quote;
+        this.advance();
         while (this.pos < this.length) {
             c = this.text.charAt(this.pos);
             if (c === "\\") {
-                this.pos++;
-                this.parseEscape();
+                s += c;
+                this.advance();
+                s += this.parseEscape();
             } else if (c === "\r" || c === "\n") {
                 throw new Error("expected quote");
             } else if (c === quote) {
-                this.pos++;
+                s += c;
+                this.advance();
                 return {
                     type: type,
-                    value: prefix + this.text.substring(p, this.pos),
+                    value: prefix + s,
                     pos: p,
                     length: this.pos - p
                 };
             } else {
-                this.pos++;
+                s += c;
+                this.advance();
             }
         }
         throw new Error("expected quote");
@@ -460,13 +490,13 @@ extend(Tokenizer.prototype, {
         if (space !== null)
             return space;
         
-        var c = this.text.charAt(this.pos);
+        var c = this.text.charAt(this.pos), p = this.pos;
         if (c === "." || isDigit(c)) {
             return this.parseNumber();
         } else if (c === "u" || c === "U" || c === "L" || c === "R") {
             var prefix = c, needString = false, isRaw = false;
-            var p = this.pos + 1;
-            var c2 = this.text.charAt(p);
+            this.advance();
+            var c2 = this.text.charAt(this.pos);
             if (c === "R") {
                 needString = true;
                 isRaw = true;
@@ -474,40 +504,39 @@ extend(Tokenizer.prototype, {
                 if (c === "u") {
                     if (c2 === "8") {
                         needString = true;
-                        p++;
+                        this.advance();
                         prefix += c2;
-                        c2 = this.text.charAt(p);
+                        c2 = this.text.charAt(this.pos);
                     }
                 }
                 if (c2 === "R") {
                     needString = true;
                     isRaw = true;
-                    p++;
+                    this.advance();
                     prefix += c2;
-                    c2 = this.text.charAt(p);
+                    c2 = this.text.charAt(this.pos);
                 }
             }
             if (c2 === "\"") {
-                this.pos = p;
                 if (isRaw) {
                     return this.parseRawStringLiteral(prefix);
                 } else {
                     return this.parseStringLiteral(prefix);
                 }
             } else if (c2 === "'") {
-                this.pos = p;
                 if (needString) {
                     throw new Error("expected \"");
                 }
                 return this.parseCharacterLiteral(prefix);
             } else {
+                this.pos = p;
                 return this.parseIdent();
             }
         } else if (c === "\"") {
             return this.parseStringLiteral("");
         } else if (c === "'") {
             return this.parseCharacterLiteral("");
-        } else if (isAlpha(c)) {
+        } else if (isAlpha(c) || c === "_") {
             return this.parseIdent();
         }
         return this.parsePunc();
@@ -528,8 +557,13 @@ extend(MacroExpander.prototype, {
         TokenStream.prototype.init.call(this);
         this.input = input;
         this.macroTable = macroTable;
-        this.expander = null;
         this.stack = stack || [];
+        this.expander = null;
+    },
+    
+    finished: function () {
+        return this.buffer.length === 0 && this.input.finished() &&
+            (this.expander === null || this.expander.finished());
     },
     
     expandObjectLikeMacro: function (macro) {
@@ -547,10 +581,10 @@ extend(MacroExpander.prototype, {
         var args = [], curArg = [];
         var input = this.input, depth, token = input.space();
         if (input.matchPunc("(")) {
+            input.space(false);
             depth = 0;
             var stream = new TokenStream();
             var expander = new MacroExpander();
-            expander.init(stream, this.macroTable, this.stack);
             while (!input.finished()) {
                 if (token = input.matchPunc(")")) {
                     if (depth === 0) {
@@ -574,6 +608,7 @@ extend(MacroExpander.prototype, {
                     depth++;
                     curArg.push(token);
                 } else if (depth === 0 && input.matchPunc(",")) {
+                    input.space(false);
                     stream.buffer = curArg;
                     expander.init(stream, this.macroTable);
                     curArg = [];
@@ -623,13 +658,31 @@ extend(MacroExpander.prototype, {
     },
     
     substituteArgs: function (body, args) {
-        var replacedBody = [], i, l = body.length, token;
+        var replacedBody = [], i, j, l = body.length, token, arg, subTok, ws = false;
         for (i = 0; i<l; i++) {
             token = body[i];
             if (token.type === IDENTIFIER && hasOwnProperty.call(args, token.value)) {
-                push.apply(replacedBody, args[token.value]);
+                arg = args[token.value];
             } else {
-                replacedBody.push(token);
+                arg = [token];
+            }
+            for (j = 0; j<arg.length; j++) {
+                subTok = arg[j];
+                if (subTok.type === WHITESPACE) {
+                    ws = true;
+                } else {
+                    if (ws) {
+                        replacedBody.push({
+                            type: WHITESPACE,
+                            value: " ",
+                            pos: subTok.pos,
+                            length: 1,
+                            hasNewLine: false
+                        });
+                        ws = false;
+                    }
+                    replacedBody.push(subTok);
+                }
             }
         }
         return replacedBody;
@@ -666,11 +719,10 @@ extend(MacroExpander.prototype, {
             }
         }
         
-        var input = this.input;
-        if (input.finished())
+        var token = this.input.next();
+        if (!token) {
             return null;
-        var token = input.next();
-        if (token.type === IDENTIFIER) {
+        } else if (token.type === IDENTIFIER) {
             return this.expandMacro(token);
         } else {
             return token;
@@ -689,26 +741,34 @@ function truncateNewLine(token) {
     };
 }
 
-function FilePreprocessor() {}
+function DirectiveExecutor() {}
 
-FilePreprocessor.prototype = new MacroExpander();
+DirectiveExecutor.prototype = new TokenStream();
 
-extend(FilePreprocessor.prototype, {
+extend(DirectiveExecutor.prototype, {
+    input: null,
     macroTable: null,
     ifStack: null,
-
-    init: function (content, macroTable) {
-        var tokenizer = new Tokenizer();
-        tokenizer.init(content);
-        MacroExpander.prototype.init.call(this, tokenizer, macroTable);
+    lineStart: false,
+    
+    init: function (input, macroTable) {
+        TokenStream.prototype.init.call(this);
+        this.input = input;
+        this.macroTable = macroTable;
         this.ifStack = [];
+        this.lineStart = true;
+    },
+    
+    finished: function () {
+        return this.buffer.length === 0 && this.input.finished();
     },
     
     skipUntilNewLine: function () {
         var token;
         while (token = this.input.next()) {
             if (token.type === WHITESPACE && token.hasNewLine) {
-                return true;
+                this.lineStart = true;
+                return truncateNewLine(token);
             }
         }
         return false;
@@ -719,7 +779,8 @@ extend(FilePreprocessor.prototype, {
         while (token = input.next()) {
             if (token.type === WHITESPACE && token.hasNewLine) {
                 input.buffer.unshift(token);
-                return tokens;
+                this.lineStart = true;
+                break;
             } else if (allowVAARGS === false && token.type === IDENTIFIER && token.value === "__VA_ARGS__") {
                 throw new Error("unexpected __VA_ARGS__");
             } else {
@@ -737,7 +798,8 @@ extend(FilePreprocessor.prototype, {
         var macro = new FunctionMacro();
         macro.init(name, params, body);
         this.macroTable[name] = macro;
-        return this.input.expectNewLine();
+        var token = truncateNewLine(this.input.expectNewLine());
+        return token;
     },
     
     parseDefine: function () {
@@ -781,7 +843,8 @@ extend(FilePreprocessor.prototype, {
             macro = new Macro();
             macro.init(name, body);
             this.macroTable[name] = macro;
-            return input.expectNewLine();
+            token = truncateNewLine(input.expectNewLine());
+            return token;
         }
     },
     
@@ -793,7 +856,6 @@ extend(FilePreprocessor.prototype, {
         input.space(false);
         var cond = this.parseCondition(),
         token = this.input.expectNewLine();
-        
         if (skip) return this.skipIfElseClauses(1);
         if (cond) {
             this.ifStack.push(1);
@@ -809,7 +871,6 @@ extend(FilePreprocessor.prototype, {
         input.space(false);
         name = input.expectId().value;
         token = input.expectNewLine();
-        
         if (skip) return this.skipIfElseClauses(1);
         if (hasOwnProperty.call(this.macroTable, name) == !negate) {
             ifStack.push(1);
@@ -859,25 +920,22 @@ extend(FilePreprocessor.prototype, {
         }
     },
     
+    parseUndef: function () {
+        var name = this.input.expectId().value,
+        token = this.input.expectNewLine();
+        delete this.macroTable[name];
+        return truncateNewLine(token);
+    },
+    
     _next: function () {
-        var expander = this.expander, token, input;
-        if (expander !== null) {
-            token = this.expander.next();
-            if (token === null) {
-                this.expander = null;
-            } else {
-                return token;
-            }
+        var input = this.input, token = input.space();
+        if (token) {
+            this.lineStart = token.hasNewLine;
+            return token;
         }
         
-        input = this.input;
-        if (input.finished())
-            return null;
-        token = input.space();
-        if (token)
-            return token;
-        
-        if (input.matchPunc("#")) {
+        if (this.lineStart && input.matchPunc("#")) {
+            this.lineStart = true;
             input.space(false);
             if (input.matchId("define")) {
                 input.space(false);
@@ -894,12 +952,14 @@ extend(FilePreprocessor.prototype, {
                 }
                 this.parseCondition();
                 input.expectNewLine();
+                this.lineStart = true;
                 return this.skipIfElseClauses(1);
             } else if (input.matchId("else")) {
                 if (this.ifStack.length === 0 || this.ifStack.pop() !== 1) {
                     throw new Error("unexpected #else");
                 }
                 input.expectNewLine();
+                this.lineStart = true;
                 return this.skipIfElseClauses(0);
             } else if (input.matchId("endif")) {
                 if (this.ifStack.length === 0) {
@@ -907,18 +967,100 @@ extend(FilePreprocessor.prototype, {
                 }
                 this.ifStack.pop();
                 token = input.expectNewLine();
+                this.lineStart = true;
                 return truncateNewLine(token);
+            } else if (input.matchId("undef")) {
+                input.space(false);
+                return this.parseUndef();
+            } else {
+                return this.skipUntilNewLine();
             }
         } else {
             token = input.next();
-            if (token && token.type === IDENTIFIER) {
-                return this.expandMacro(token);
-            } else {
-                return token;
+            if (!token) {
+                return null;
             }
+            return token;
         }
     }
 });
+
+function ConditionParser() {}
+
+ConditionParser.unary = {
+    neg: function (x) {
+        return -x;
+    },
+    
+    not: function () {
+        return x === 0? 1: 0;
+    },
+    
+    compl: function () {
+        return ~x;
+    }
+};
+
+ConditionParser.prototype = new MacroExpander();
+extend(ConditionParser.prototype, {
+    input: null,
+    
+    init: function (input, macroTable) {
+        ConditionParser.prototype.init.call(this, input, macroTable);
+    },
+    
+    parsePrimary: function () {
+        var token = this.next();
+        if (token.type === NUMBER) {
+            return parseInt(token.value);
+        } else if (token.type === CHARACTER) {
+            return this.parseCharacter(token.value);
+        } else if (token.type === IDENTIFIER) {
+            return 0;
+        } else if (token.type === PUNC && token.value === "(") {
+            this.space(false);
+            return this.parse();
+        } else {
+            throw new Error();
+        }
+    },
+    
+    parseUnary: function () {
+        var token, filter = [], x, i;
+        while (!this.finished() {
+            if (this.matchPunc("+")) {
+            } else if (this.matchPunc("-")) {
+                filter.push(ConditionParser.unary.neg);
+                this.space(false);
+            } else if (this.matchPunc("!")) {
+                filter.push(ConditionParser.unary.not);
+                this.space(false);
+            } else if (this.matchPunc("~")) {
+                filter.push(ConditionParser.unary.compl);
+                this.space(false);
+            } else {
+                x = this.parsePrimary();
+                i = filter.length;
+                while (i--) {
+                    x = filter(x);
+                }
+                return x;
+            }
+        }
+        throw new Error();
+    },
+    
+    parseAdd: function () {
+        var first, op, second;
+        first = this.parseUnary();
+        while (true) {
+        }
+    },
+    
+    parse: function () {
+        
+    }
+};
 
 function Macro() {}
 
@@ -963,7 +1105,7 @@ exports.tokenTypes = {
 exports.TokenStream = TokenStream;
 exports.Tokenizer = Tokenizer;
 exports.MacroExpander = MacroExpander;
-exports.FilePreprocessor = FilePreprocessor;
+exports.DirectiveExecutor = DirectiveExecutor;
 exports.Macro = Macro;
 exports.FunctionMacro = FunctionMacro;
 
@@ -971,7 +1113,7 @@ if (typeof require === "function") {
     var fs = require("fs");
     exports.processFile = function (path) {
         var content = fs.readFileSync(path);
-        var fp = new FilePreprocessor();
+        var fp = new DirectiveExecutor();
         fp.init(content, {});
         fp.print(function (str) {
             process.stdout.write(str);
@@ -1048,14 +1190,30 @@ function testMacroExpansion() {
     assert(expander.next() === null);
 }
 
-function testFile() {
-    var content = "#define a(x) b(x) + 1\n#define b(x) x + 2\na(0)\na (0)\nb(b(0))\n#define c(x) c(x + 1)\nc(0)\n\nconst int x = 1;\n#if x\nfoo\n#endif\n\n#define e \\\\\nfoo\ne\n\n#define f (0)\n#define g() a\ng()f\n#define g2(x, y) x y\ng2(g(), f)\n\n#define h(x) x(0)\nh(a)\n\n#define i(x) k(x)\n#define j 1,2\n#define k(x, y) x foo y\ni(j)\ng2(^s#  0\\, *- sa:_ $)\ng2([(]0), ((}}1)){)\ng2( , )\n#define l() 0\nl( )\n#define m(a, ...) a + __VA_ARGS__\nm(1, 2, 3)\n";
-    var fp = new FilePreprocessor();
+function testDe(content) {
+    var macroTable = {};
+    var tokenizer = new Tokenizer();
+    tokenizer.init(content);
+    var de = new DirectiveExecutor();
+    de.init(tokenizer, macroTable);
+    var expander = new MacroExpander();
+    expander.init(de, macroTable);
     var buffer = [];
-    fp.init(content, {});
-    fp.print(function (str) {
+    expander.print(function (str) {
         buffer.push(str);
     });
     console.log(buffer.join(""));
+}
+
+function testInvDir() {
+    testDe("#define f(x) x x\n\
+f (1\n\
+#undef f\n\
+#define f 2\n\
+f)");
+}
+
+function testFile() {
+    testDe("#define a(x) b(x) + 1\n#define b(x) x + 2\na(0)\na (0)\nb(b(0))\n#define c(x) c(x + 1)\nc(0)\n\nconst int x = 1;\n#if x\nfoo\n#endif\n\n#define e \\\\\nfoo\ne\n\n#define f (0)\n#define g() a\ng()f\n#define g2(x, y) x y\ng2(g(), f)\n\n#define h(x) x(0)\nh(a)\n\n#define i(x) k(x)\n#define j 1,2\n#define k(x, y) x foo y\ni(j)\ng2(^s#  0\\, *- sa:_ $)\ng2([(]0), ((}}1)){)\ng2( , )\n#define l() 0\nl( )\n#define m(a, ...) a + __VA_ARGS__\nm(1, 2, 3)\n");
 }
 
