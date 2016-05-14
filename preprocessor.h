@@ -5,6 +5,7 @@
 #include <vector>
 #include <deque>
 #include <memory>
+#include <map>
 
 namespace cpp {
 /*
@@ -240,31 +241,31 @@ namespace cpp {
         Token(token_type t, const std::string &v, const PosInfo &posInfo, bool nl = false):
                 _type(t), _value(v), _file(posInfo.file), _line(posInfo.line), _col(posInfo.col), _pos(posInfo.pos), _hasNewLine(nl) { }
 
-        token_type type() {
+        token_type type() const {
             return _type;
         }
 
-        const std::string &value() {
+        const std::string &value() const {
             return _value;
         }
 
-        bool hasNewLine() {
+        bool hasNewLine() const {
             return _hasNewLine;
         }
 
-        const std::string &file() {
+        const std::string &file() const {
             return _file;
         }
 
-        int line() {
+        int line() const {
             return _line;
         }
 
-        int col() {
+        int col() const {
             return _col;
         }
 
-        const pos_t &pos() {
+        const pos_t &pos() const {
             return _pos;
         }
 
@@ -280,25 +281,41 @@ namespace cpp {
 
     class Macro {
     public:
-        Macro(const std::string &n):
-                _name(n), _body() { }
+        Macro(const std::string &n, bool f = false):
+                _name(n), _body(), _isFunctionLike(f) { }
 
-        const std::string &name() {
+        const std::string &name() const {
             return _name;
+        }
+
+        bool isFunctionLike() const {
+            return _isFunctionLike;
+        }
+
+        bool empty() const {
+            return _body.empty();
+        }
+
+        const std::deque &body() const {
+            return _body;
         }
 
         void addToken(const std::shared_ptr<Token> token) {
             _body.push_back(token);
         }
     private:
-        bool isFunctionLike;
+        bool _isFunctionLike;
         std::string _name;
         std::deque<std::shared_ptr<Token>> _body;
     };
 
     class FunctionMacro: public Macro {
         FunctionMacro(const std::string &n):
-                Macro(n), _params() { }
+                Macro(n, true), _params() { }
+
+        const std::deque<std::string> &params() const {
+            return _params;
+        }
 
         void addParam(const std::string param) {
             _params.push_back(param);
@@ -312,12 +329,16 @@ namespace cpp {
         TokenStream():
                 buffer() {}
 
-        bool finished() {
+        bool finished() const {
             return buffer.empty() && _finished();
         }
 
-        virtual bool _finished() {
+        virtual bool _finished() const {
             return true;
+        }
+
+        void setBuffer(const std::deque<token_t> &buf) {
+            buffer = buf;
         }
 
         token_t next() {
@@ -331,21 +352,21 @@ namespace cpp {
         }
 
         virtual token_t _next() {
-            return token_t();
+            return token_t(nullptr);
         }
 
         void unget(token_t token) {
             buffer.push_front(token);
         }
 
-        token_t space(bool allowNewLine) {
+        token_t space(bool allowNewLine = true) {
             auto token = next();
             if (!token)
                 return token;
             else if (token->type() != Token::WHITESPACE ||
                         (!allowNewLine && token->hasNewLine())) {
                 unget(token);
-                return token_t();
+                return token_t(nullptr);
             } else {
                 return token;
             }
@@ -364,7 +385,7 @@ namespace cpp {
                 return token;
             } else {
                 unget(token);
-                return token_t();
+                return token_t(nullptr);
             }
         }
 
@@ -394,7 +415,7 @@ namespace cpp {
         }
 
         void print(std::ostream os) {
-            auto prev = token_t();
+            auto prev = token_t(nullptr);
             while (auto token = next()) {
                 if (prev) {
                     if (prev->type() == Token::NUMBER ||
@@ -412,28 +433,28 @@ namespace cpp {
 
     class Tokenizer: public TokenStream {
     public:
-        Tokenizer(std::istream &i, const std::string &f): input(i), buffer(), pos(f), startPos(f), hasReturn(false) {}
+        Tokenizer(std::istream &i, const std::string &f): input(i), tokenBuffer(), pos(f), startPos(f), hasReturn(false) {}
 
-        virtual bool _finished() {
+        virtual bool _finished() const {
             return input.eof();
         }
 
         void spliceLine();
 
-        void advance();
+        void advance(bool raw = false);
 
-        int match(int c, bool output = true) {
+        int match(int c, bool output = true, bool raw = false) {
             if (input.peek() == c) {
-                advance();
+                advance(raw);
                 if (output)
-                    buffer << (char) c;
+                    tokenBuffer << (char) c;
                 return c;
             } else {
                 return 0;
             }
         }
 
-        bool match(const std::string &s, bool output = true);
+        bool match(const std::string &s, bool output = true, bool raw = false);
 
         token_t parseSpace();
         token_t parseId();
@@ -442,10 +463,12 @@ namespace cpp {
         void parseEscape();
         token_t parseCharSequence(char quote, Token::token_type type);
         token_t parseRawString();
+
+        virtual token_t _next();
     private:
         void startToken() {
             startPos = pos;
-            buffer.str("");
+            tokenBuffer.str("");
         }
 
         void newLine() {
@@ -463,7 +486,7 @@ namespace cpp {
                     c >= 'A' && c <= 'F' ||
                     c >= 'a' && c <= 'f') {
                 advance();
-                buffer << (char) c;
+                tokenBuffer << (char) c;
             } else {
                 throw "Expected hexadecimal digit";
             }
@@ -473,15 +496,69 @@ namespace cpp {
             int c = input.peek();
             if (c >= '0' && c <= '7') {
                 advance();
-                buffer << (char) c;
+                tokenBuffer << (char) c;
             }
         }
 
+        std::string escape(int c) {
+            return c == '\t'? "\\t":
+                   c == '\f'? "\\f":
+                   c == '\n'? "\\n":
+                   c == '\r'? "\\r": "";
+        }
+
         std::istream &input;
-        std::stringstream buffer;
+        std::stringstream tokenBuffer;
         PosInfo pos;
         PosInfo startPos;
         bool hasReturn;
+    };
+
+    typedef std::shared_ptr<std::map<std::string, std::shared_ptr<Macro>>> macro_table_t;
+
+    class MacroStack {
+    public:
+        MacroStack(const std::string &x):
+                car(x), cdr(nullptr) {}
+        MacroStack(const std::string &x, std::shared_ptr<MacroStack> xs):
+                car(x), cdr(xs) {}
+
+        bool hasName(const std::string &key) {
+            if (key == car)
+                return true;
+            else if (cdr)
+                return cdr->hasName(key);
+            else
+                return false;
+        }
+
+        std::string car;
+        std::shared_ptr<MacroStack> cdr;
+    };
+
+    class MacroExpander: public TokenStream {
+    public:
+        MacroExpander(std::shared_ptr<TokenStream> i, macro_table_t t, std::shared_ptr<MacroStack> s):
+                input(i), macroTable(t), stack(s) {};
+
+        virtual bool _finished() const {
+            return input->finished() &&
+                    (!expander || expander->finished());
+        }
+
+        virtual token_t _next();
+    private:
+        token_t expandMacro(token_t name);
+        token_t expandObjectMacro(const Macro& macro);
+        token_t expandFunctionMacro(token_t name, const FunctionMacro &macro);
+
+        std::shared_ptr<std::deque<token_t>> scanArg(std::shared_ptr<std::deque<token_t>> curArg);
+        std::shared_ptr<std::deque<token_t>> subBody(const FunctionMacro &macro, const std::vector<std::shared_ptr<std::deque<token_t>>> &args);
+
+        std::shared_ptr<TokenStream> input;
+        std::shared_ptr<TokenStream> expander;
+        macro_table_t macroTable;
+        std::shared_ptr<MacroStack> stack;
     };
 }
 

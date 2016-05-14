@@ -581,7 +581,7 @@ extend(MacroExpander.prototype, {
         var args = [], curArg = [];
         var input = this.input, depth, token = input.space();
         if (input.matchPunc("(")) {
-            input.space(false);
+            input.space();
             depth = 0;
             var stream = new TokenStream();
             var expander = new MacroExpander();
@@ -608,7 +608,7 @@ extend(MacroExpander.prototype, {
                     depth++;
                     curArg.push(token);
                 } else if (depth === 0 && input.matchPunc(",")) {
-                    input.space(false);
+                    input.space();
                     stream.buffer = curArg;
                     expander.init(stream, this.macroTable);
                     curArg = [];
@@ -621,7 +621,8 @@ extend(MacroExpander.prototype, {
                 }
             }
         } else {
-            this.buffer.unshift(token);
+            if (token)
+                input.buffer.unshift(token);
             return name;
         }
     },
@@ -691,7 +692,7 @@ extend(MacroExpander.prototype, {
     expandMacro: function (name) {
         var input = this.input, macro, arg;
         
-        if (name.value === "__VA_ARGS") {
+        if (name.value === "__VA_ARGS__") {
             throw new Error("unexpected __VA_ARGS__");
         }
         
