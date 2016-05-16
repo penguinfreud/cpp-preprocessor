@@ -239,7 +239,7 @@ namespace cpp {
         };
 
         Token(token_type t, const std::string &v, const PosInfo &posInfo, bool nl = false):
-                _type(t), _value(v), _file(posInfo.file), _line(posInfo.line), _col(posInfo.col), _pos(posInfo.pos), _hasNewLine(nl) { }
+                _type(t), _value(v), _pos(posInfo), _hasNewLine(nl) { }
 
         token_type type() const {
             return _type;
@@ -253,27 +253,14 @@ namespace cpp {
             return _hasNewLine;
         }
 
-        const std::string &file() const {
-            return _file;
-        }
-
-        int line() const {
-            return _line;
-        }
-
-        int col() const {
-            return _col;
-        }
-
-        const pos_t &pos() const {
+        const PosInfo &pos() const {
             return _pos;
         }
 
     private:
         token_type _type;
-        std::string _file, _value;
-        pos_t _pos;
-        int _line, _col;
+        const PosInfo _pos;
+        std::string _value;
         bool _hasNewLine;
     };
 
@@ -296,7 +283,7 @@ namespace cpp {
             return _body.empty();
         }
 
-        const std::deque &body() const {
+        const std::deque<token_t> &body() const {
             return _body;
         }
 
@@ -310,6 +297,7 @@ namespace cpp {
     };
 
     class FunctionMacro: public Macro {
+    public:
         FunctionMacro(const std::string &n):
                 Macro(n, true), _params() { }
 
@@ -324,10 +312,16 @@ namespace cpp {
         std::deque<std::string> _params;
     };
 
+    typedef std::shared_ptr<std::map<std::string, std::shared_ptr<Macro>>> macro_table_t;
+
+    class MacroExpander;
+
     class TokenStream {
     public:
         TokenStream():
                 buffer() {}
+        TokenStream(const std::deque<token_t> buf):
+                buffer(buf) {}
 
         bool finished() const {
             return buffer.empty() && _finished();
@@ -335,10 +329,6 @@ namespace cpp {
 
         virtual bool _finished() const {
             return true;
-        }
-
-        void setBuffer(const std::deque<token_t> &buf) {
-            buffer = buf;
         }
 
         token_t next() {
@@ -402,6 +392,18 @@ namespace cpp {
             return match(Token::PUNC, v);
         }
 
+        token_t matchPunc(char c) {
+            auto token = next();
+            if (token && token->type() == Token::PUNC) {
+                const std::string &v = token->value();
+                if (v.size() == 1 && v[0] == c) {
+                    return token;
+                }
+            }
+            unget(token);
+            return token_t(nullptr);
+        }
+
         token_t expectPunc(const std::string &v) {
             return expect(Token::PUNC, v);
         }
@@ -427,6 +429,8 @@ namespace cpp {
                 os << token->value();
             }
         }
+
+        std::shared_ptr<MacroExpander> expandMacro(macro_table_t table);
     private:
         std::deque<token_t> buffer;
     };
@@ -514,8 +518,6 @@ namespace cpp {
         bool hasReturn;
     };
 
-    typedef std::shared_ptr<std::map<std::string, std::shared_ptr<Macro>>> macro_table_t;
-
     class MacroStack {
     public:
         MacroStack(const std::string &x):
@@ -553,12 +555,39 @@ namespace cpp {
         token_t expandFunctionMacro(token_t name, const FunctionMacro &macro);
 
         std::shared_ptr<std::deque<token_t>> scanArg(std::shared_ptr<std::deque<token_t>> curArg);
-        std::shared_ptr<std::deque<token_t>> subBody(const FunctionMacro &macro, const std::vector<std::shared_ptr<std::deque<token_t>>> &args);
+        std::deque<token_t> subBody(const FunctionMacro &macro, const std::vector<std::shared_ptr<std::deque<token_t>>> &args);
 
         std::shared_ptr<TokenStream> input;
         std::shared_ptr<TokenStream> expander;
         macro_table_t macroTable;
         std::shared_ptr<MacroStack> stack;
+    };
+
+    std::shared_ptr<MacroExpander> TokenStream::expandMacro(macro_table_t table) {
+        return std::make_shared<MacroExpander>(std::shared_ptr<TokenStream>(this), table, std::shared_ptr<MacroStack>());
+    }
+
+    class DirectiveParser: public TokenStream {
+    public:
+        DirectiveParser(std::shared_ptr<TokenStream> i, macro_table_t t):
+                input(i), table(t), ifStack(), lineStart(true) {}
+
+        virtual bool _finished() {
+            return input->finished();
+        }
+
+        virtual token_t _next();
+
+        token_t parseDefine();
+        token_t parseUndef();
+        token_t parseIf(bool defined, bool neg = false);
+
+        token_t skipLine();
+    private:
+        std::shared_ptr<TokenStream> input;
+        macro_table_t table;
+        std::vector<bool> ifStack;
+        bool lineStart;
     };
 }
 

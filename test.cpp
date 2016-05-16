@@ -1,4 +1,3 @@
-#define foo bar
-1''foo
-1.foo
-1_foo
+#if 1? 2: 1
+int x;
+#endif

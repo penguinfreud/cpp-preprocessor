@@ -1,6 +1,7 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
 #include "preprocessor.h"
 
 namespace cpp {
@@ -99,7 +100,7 @@ namespace cpp {
         if (str.empty()) {
             return token_t(nullptr);
         } else {
-            return token_t(new Token(Token::WHITESPACE, tokenBuffer.str(), startPos, hasNewLine));
+            return std::make_shared<Token>(Token::WHITESPACE, tokenBuffer.str(), startPos, hasNewLine);
         }
     }
 
@@ -113,7 +114,7 @@ namespace cpp {
                 break;
             }
         }
-        return token_t(new Token(Token::IDENTIFIER, tokenBuffer.str(), startPos));
+        return std::make_shared<Token>(Token::IDENTIFIER, tokenBuffer.str(), startPos);
     }
 
     token_t Tokenizer::parseNumber() {
@@ -156,18 +157,18 @@ namespace cpp {
                 break;
             }
         }
-        return token_t(new Token(Token::NUMBER, tokenBuffer.str(), startPos));
+        return std::make_shared<Token>(Token::NUMBER, tokenBuffer.str(), startPos);
     }
 
     token_t Tokenizer::parsePunc() {
         for (int i = 0; i<PP_PUNCS_COUNT; i++) {
             if (match(PP_PUNCS[i]), false) {
-                return token_t(new Token(Token::PUNC, PP_PUNCS[i], startPos));
+                return std::make_shared<Token>(Token::PUNC, PP_PUNCS[i], startPos);
             }
         }
         int c = input.peek();
         advance();
-        return token_t(new Token(Token::PUNC, (char*)&c, startPos));
+        return std::make_shared<Token>(Token::PUNC, (char*)&c, startPos);
     }
 
     void Tokenizer::parseEscape() {
@@ -208,7 +209,7 @@ namespace cpp {
             if (match('\\')) {
                 parseEscape();
             } else if (match(quote)) {
-                return token_t(new Token(type, tokenBuffer.str(), startPos));
+                return std::make_shared<Token>(type, tokenBuffer.str(), startPos);
             } else if (match('\r', false) || match('\n', false)) {
                 throw "Unterminated string";
             } else {
@@ -229,7 +230,7 @@ namespace cpp {
                 auto indicator = ")" + ss.str() + "\"";
                 while (!input.eof()) {
                     if (match(indicator, true, true)) {
-                        return token_t(new Token(Token::STRING, tokenBuffer.str(), startPos));
+                        return std::make_shared<Token>(Token::STRING, tokenBuffer.str(), startPos);
                     } else {
                         tokenBuffer << (char) input.peek();
                         advance(true);
@@ -321,11 +322,11 @@ namespace cpp {
     token_t MacroExpander::expandMacro(token_t name) {
         if (name->value() == "__VA_ARGS__")
             throw "Unexpected __VA_ARGS__";
-        if (stack->hasName(name->value())) {
+        if ((!stack || !(stack->hasName(name->value()))) && macroTable) {
             auto macro = (*macroTable)[name->value()];
             if (macro) {
                 if (macro->isFunctionLike()) {
-                    return expandFunctionMacro(name, *std::dynamic_pointer_cast<FunctionMacro>(macro));
+                    return expandFunctionMacro(name, *static_cast<FunctionMacro*>(macro.get()));
                 } else {
                     return expandObjectMacro(*macro);
                 }
@@ -336,39 +337,38 @@ namespace cpp {
 
     token_t MacroExpander::expandObjectMacro(const Macro &macro) {
         if (!macro.empty()) {
-            auto stream = new TokenStream();
-            stream->setBuffer(macro.body());
-            expander = new MacroExpander(stream, macroTable, new MacroStack(macro.name(), stack));
+            auto stream = std::make_shared<TokenStream>(macro.body());
+            expander = std::make_shared<MacroExpander>(stream, macroTable, std::make_shared<MacroStack>(macro.name(), stack));
         }
         return _next();
     }
 
     token_t MacroExpander::expandFunctionMacro(token_t name, const FunctionMacro &macro) {
         auto token = input->space();
-        if (input->matchPunc("(")) {
+        if (input->matchPunc('(')) {
             input->space();
             std::vector<std::shared_ptr<std::deque<token_t>>> args;
-            std::shared_ptr<std::deque<token_t>> curArg(new std::deque);
+            auto curArg = std::make_shared<std::deque<token_t>>();
             int depth = 0;
             while (!input->finished()) {
-                if ((token = input->matchPunc(")"))) {
+                if ((token = input->matchPunc(')'))) {
                     if (depth == 0) {
                         args.push_back(scanArg(curArg));
 
-                        auto stream = new TokenStream();
-                        stream->setBuffer(*subBody(macro, args));
-                        expander = new MacroExpander(stream, macroTable, new MacroStack(macro.name(), stack));
+                        auto stream = std::make_shared<TokenStream>(subBody(macro, args));
+                        expander = std::make_shared<MacroExpander>(stream, macroTable, std::make_shared<MacroStack>(macro.name(), stack));
                         return _next();
                     } else {
                         depth--;
                         curArg->push_back(token);
                     }
-                } else if ((token = input->matchPunc("("))) {
+                } else if ((token = input->matchPunc('('))) {
                     depth++;
                     curArg->push_back(token);
-                } else if (depth == 0 && input->matchPunc(",")) {
+                } else if (depth == 0 && input->matchPunc(',')) {
                     input->space();
                     args.push_back(scanArg(curArg));
+                    curArg = std::make_shared<std::deque<token_t>>();
                 } else {
                     curArg->push_back(input->next());
                 }
@@ -380,14 +380,145 @@ namespace cpp {
         }
     }
 
-    std::shared_ptr<std::deque<token_t>> MacroExpander::scanArg(std::shared_ptr<std::deque<token_t>> curArg) {
-
+    std::shared_ptr<std::deque<token_t>> MacroExpander::scanArg(std::shared_ptr<std::deque<token_t>> arg) {
+        auto stream = std::make_shared<TokenStream>(*arg);
+        MacroExpander expander(stream, macroTable, stack);
+        std::shared_ptr<std::deque<token_t>> newArg;
+        while (auto token = expander.next()) {
+            newArg->push_back(token);
+        }
+        return newArg;
     }
 
-    std::shared_ptr<std::deque<token_t>> MacroExpander::subBody(const FunctionMacro &macro,
-                                                                const std::vector<std::shared_ptr<std::deque<token_t>>> &args) {
-        
+    namespace {
+        void appendToken(std::deque<token_t> &list, token_t token, bool &ws) {
+            if (token->type() == Token::WHITESPACE) {
+                ws = true;
+            } else {
+                if (ws) {
+                    list.push_back(std::make_shared<Token>(Token::WHITESPACE, " ", token->pos()));
+                }
+                list.push_back(token);
+            }
+        }
+
+        void appendTokens(std::deque<token_t> &list, std::shared_ptr<std::deque<token_t>> append, bool &ws) {
+            for (auto token: *append) {
+                appendToken(list, token, ws);
+            }
+        }
+
+        int findParam(const std::deque<std::string> &params, const std::string &name) {
+            for (int i = 0; i<params.size(); i++) {
+                if (params[i] == name)
+                    return i;
+            }
+            return -1;
+        }
     }
+
+    std::deque<token_t>
+        MacroExpander::subBody(const FunctionMacro &macro,
+                               const std::vector<std::shared_ptr<std::deque<token_t>>> &args) {
+        const auto &params = macro.params();
+        auto l = params.size();
+
+        bool hasVAARGS = params[l-1] == "__VA_ARGS__";
+        if (hasVAARGS? args.size() < l-1: args.size() != l) {
+            throw "Too few args";
+        }
+
+        bool ws = false;
+        std::deque<token_t> result;
+
+        for (auto token: macro.body()) {
+            if (token->type() == Token::IDENTIFIER) {
+                if (token->value() == "__VA_ARGS__") {
+                    if (!hasVAARGS)
+                        throw "Unexpected __VA_ARGS__";
+                    for (auto i = l-1; i<args.size(); i++) {
+                        if (i > l-1) {
+                            auto comma = std::make_shared<Token>(Token::PUNC, ",", PosInfo(token->pos()));
+                            appendToken(result, comma, ws);
+                        }
+                        appendTokens(result, args[i], ws);
+                    }
+                } else {
+                    int i = findParam(params, token->value());
+                    if (i >= 0) {
+                        appendTokens(result, args[i], ws);
+                    } else {
+                        appendToken(result, token, ws);
+                    }
+                }
+            } else {
+                appendToken(result, token, ws);
+            }
+        }
+        return result;
+    }
+
+    namespace {
+        token_t truncateLine(token_t token) {
+            const std::string &v = token->value();
+            unsigned long pos;
+            for (auto i = v.size()-1; i>=0; --i) {
+                if (v[i] == '\n') {
+                    if (i > 0 && v[i-1] == '\r') {
+                        pos = i-1;
+                    } else {
+                        pos = i;
+                    }
+                    break;
+                } else if (v[i] == '\r') {
+                    pos = i;
+                    break;
+                }
+            }
+            return std::make_shared<Token>(Token::WHITESPACE, v.substr(pos), token->pos());
+        }
+    }
+
+    token_t DirectiveParser::_next() {
+        if (lineStart && input->matchPunc('#')) {
+            lineStart = false;
+            input->space(false);
+            if (input->matchId("define")) {
+                input->space(false);
+                return parseDefine();
+            } else if (input->matchId("undef")) {
+                input->space(false);
+                return parseUndef();
+            } else if (input->matchId("if")) {
+                return parseIf(false);
+            } else if (input->matchId("ifdef")) {
+                return parseIf(true, false);
+            } else if (input->matchId("ifndef")) {
+                return parseIf(true, true);
+            } else if (input->matchId("elif")) {
+
+            } else if (input->matchId("else")) {
+
+            } else if (input->matchId("endif")) {
+
+            } else {
+                skipLine();
+            }
+        }
+    }
+
+    token_t DirectiveParser::skipLine() {
+        while (auto token = input->next()) {
+            if (token->type() == Token::WHITESPACE && token->hasNewLine()) {
+                return truncateLine(token);
+            }
+        }
+        return token_t(nullptr);
+    }
+
+    token_t DirectiveParser::parseDefine() { }
+    token_t DirectiveParser::parseUndef() { }
+    token_t DirectiveParser::parseIf(bool defined, bool neg) { }
 }
 
 inline void assert(bool cond) {
@@ -395,9 +526,7 @@ inline void assert(bool cond) {
         throw "Assertion failed";
 }
 
-int main(int argc, char **argv) {
-    /*std::ifstream ifs;
-    ifs.open("/home/wsy/courses/OOP/lab3/lab3.h");*/
+void testTokenizer() {
     using namespace cpp;
     std::stringstream ss;
     ss.str("a/*foo\n*/b //\n");
@@ -448,4 +577,38 @@ int main(int argc, char **argv) {
     } catch (char const *e) {
         std::cout << e << std::endl;
     }
+}
+
+void testMacroExpansion() {
+    using namespace cpp;
+    std::stringstream ss;
+    ss.str("foo");
+    macro_table_t table = std::make_shared<std::map<std::string, std::shared_ptr<Macro>>>();
+    auto macro = std::make_shared<Macro>("foo");
+    PosInfo pi("anon");
+    macro->addToken(std::make_shared<Token>(Token::NUMBER, "2", pi));
+    (*table)["foo"] = macro;
+    auto expander = (new Tokenizer(ss, "anon"))->expandMacro(table);
+    auto token = expander->next();
+    std::cout << token->type() << std::endl;
+    std::cout << token->value() << std::endl;
+}
+
+class A {
+public:
+    ~A() {
+        std::cout << "destructor" << std::endl;
+    }
+};
+
+int main(int argc, char **argv) {
+    /*std::ifstream ifs;
+    ifs.open("/home/wsy/courses/OOP/lab3/lab3.h");*/
+    //testTokenizer();
+    //testMacroExpansion();
+    A *pa = new A();
+    auto spa1 = new std::shared_ptr<A>(pa);
+    auto spa2 = new std::shared_ptr<A>(pa);
+    delete spa1;
+    delete spa2;
 }

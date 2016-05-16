@@ -377,12 +377,14 @@ extend(Tokenizer.prototype, {
             s = c;
         } else if (c === "x" || c === "u") {
             this.advance;
+            s = c;
             s += this.hex();
             s += this.hex();
             s += this.hex();
             s += this.hex();
         } else if (c === "U") {
             this.advance();
+            s = c;
             s += this.hex();
             s += this.hex();
             s += this.hex();
@@ -850,7 +852,15 @@ extend(DirectiveExecutor.prototype, {
     },
     
     parseCondition: function () {
-        
+        var stream = new TokenStream();
+        stream.buffer = this.untilNewLine();
+        var cp = new ConditionParser();
+        cp.init(stream, this.macroTable);
+        var ret = cp.parse();
+        if (stream.buffer.length > 0) {
+            throw new Error("Unexpected " + stream.buffer[0].value);
+        }
+        return ret;
     },
     
     parseIf: function (skip) {
@@ -1020,7 +1030,9 @@ extend(ConditionParser.prototype, {
             return 0;
         } else if (token.type === PUNC && token.value === "(") {
             this.space(false);
-            return this.parse();
+            var ret = this.parse();
+            this.expectPunc(")");
+            return ret;
         } else {
             throw new Error();
         }
@@ -1028,12 +1040,12 @@ extend(ConditionParser.prototype, {
     
     parseUnary: function () {
         var token, filter = [], x, i;
-        while (!this.finished() {
+        while (!this.finished()) {
             if (this.matchPunc("+")) {
             } else if (this.matchPunc("-")) {
                 filter.push(ConditionParser.unary.neg);
                 this.space(false);
-            } else if (this.matchPunc("!")) {
+            } else if (this.matchPunc("!") || this.matchId("not")) {
                 filter.push(ConditionParser.unary.not);
                 this.space(false);
             } else if (this.matchPunc("~")) {
@@ -1041,27 +1053,161 @@ extend(ConditionParser.prototype, {
                 this.space(false);
             } else {
                 x = this.parsePrimary();
+                this.space(false);
                 i = filter.length;
                 while (i--) {
-                    x = filter(x);
+                    x = filter[i](x);
                 }
                 return x;
             }
         }
         throw new Error();
     },
-    
-    parseAdd: function () {
-        var first, op, second;
-        first = this.parseUnary();
+
+    parseMultiply: function() {
+        var first = this.parseUnary();
         while (true) {
+            if (this.matchPunc("*")) {
+                this.space(false);
+                first *= this.parseUnary();
+            } else if (this.matchPunc("/")) {
+                this.space(false);
+                first = Math.floor(first / this.parseUnary());
+                if (!isFinite(first)) {
+                    throw new Error("Arithmetic error");
+                }
+            } else if (this.matchPunc("%")) {
+                this.space(false);
+                first %= this.parseUnary();
+            } else {
+                return first;
+            }
         }
     },
     
+    parseAdd: function () {
+        var first = this.parseMultiply();
+        while (true) {
+            if (this.matchPunc("+")) {
+                this.space(false);
+                first += this.parseMultiply();
+            } else if (this.matchPunc("-")) {
+                this.space(false);
+                first -= this.parseMultiply();
+            } else {
+                return first;
+            }
+        }
+    },
+
+    parseShift: function() {
+        var first = this.parseAdd();
+        while (true) {
+            if (this.matchPunc("<<")) {
+                this.space(false);
+                first <<= this.parseAdd();
+            } else if (matchPunc(">>")) {
+                this.space(false);
+                first >>= this.parseAdd();
+            } else {
+                return first;
+            }
+        }
+    },
+
+    parseRelation: function () {
+        var first = this.parseShift();
+        while (true){
+            if (this.matchPunc("<")) {
+                this.space(false);
+                first = first < this.parseShift()? 1: 0;
+            } else if (this.matchPunc("<=")) {
+                this.space(false);
+                first = first <= this.parseShift() ? 1 : 0;
+            } else if (this.matchPunc(">")) {
+                this.space(false);
+                first = first > this.parseShift() ? 1 : 0;
+            } else if (this.matchPunc(">=")) {
+                this.space(false);
+                first = first >= this.parseShift() ? 1 : 0;
+            } else {
+                return first;
+            }
+        }
+    },
+
+    parseEquality: function () {
+        var first = this.parseRelation();
+        while (true) {
+            if (this.matchPunc("==") || this.matchId("eq")) {
+                this.space(false);
+                first = first === this.parseEquality()? 1: 0;
+            } else if (this.matchPunc("!=") || this.matchId("not_eq")) {
+                this.space(false);
+                first = first !== this.parseEquality()? 1: 0;
+            } else {
+                return first;
+            }
+        }
+    },
+
+    parseBitwiseAnd: function () {
+        var first = this.parseEquality();
+        while (this.matchPunc("&") || this.matchId("bitand")) {
+            this.space(false);
+            first &= this.parseEquality();
+        }
+        return first;
+    },
+
+    parseBitwiseXor: function () {
+        var first = this.parseBitwiseAnd();
+        while (this.matchPunc("^") || this.matchId("xor")) {
+            this.space(false);
+            first ^= this.parseBitwiseAnd();
+        }
+        return first;
+    },
+
+    parseBitwiseOr: function () {
+        var first = this.parseBitwiseXor();
+        while (this.matchPunc("|") || this.matchId("bitor")) {
+            this.space(false);
+            first |= this.parseBitwiseXor();
+        }
+        return first;
+    },
+
+    parseAnd: function () {
+        var first = this.parseBitwiseOr();
+        while (this.matchPunc("&&") || this.matchId("and")) {
+            this.space(false);
+            first = first && this.parseBitwiseOr()? 1: 0;
+        }
+        return first;
+    },
+
+    parseOr: function () {
+        var first = this.parseAnd();
+        while (this.matchPunc("||") || this.matchId("or")) {
+            this.space(false);
+            first = first || this.parseAnd()? 1: 0;
+        }
+        return first;
+    },
+    
     parse: function () {
-        
+        var cond = this.parseOr();
+        if (this.matchPunc("?")) {
+            this.space(false);
+            var seq = this.parse(),
+                alt = this.parse();
+            return cond? seq: alt;
+        } else {
+            return cond;
+        }
     }
-};
+});
 
 function Macro() {}
 
@@ -1109,18 +1255,6 @@ exports.MacroExpander = MacroExpander;
 exports.DirectiveExecutor = DirectiveExecutor;
 exports.Macro = Macro;
 exports.FunctionMacro = FunctionMacro;
-
-if (typeof require === "function") {
-    var fs = require("fs");
-    exports.processFile = function (path) {
-        var content = fs.readFileSync(path);
-        var fp = new DirectiveExecutor();
-        fp.init(content, {});
-        fp.print(function (str) {
-            process.stdout.write(str);
-        });
-    };
-}
 
 function assert(cond, msg) {
     if (!cond)
