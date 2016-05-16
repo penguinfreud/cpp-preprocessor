@@ -796,7 +796,7 @@ extend(DirectiveExecutor.prototype, {
         return tokens;
     },
     
-    parseFunctionMacroTail: function (name, params, allowVAARGS) {
+    parseFunctionMacroTail: function (name, params) {
         var body = this.untilNewLine(false);
         var macro = new FunctionMacro();
         macro.init(name, params, body);
@@ -813,11 +813,11 @@ extend(DirectiveExecutor.prototype, {
             throw new Error("Invalid macro name: " + name);
         }
         if (input.matchPunc("(")) {
+            input.space(false);
             var first = true, params = [];
             while (!input.finished()) {
-                input.space(false);
                 if (input.matchPunc(")")) {
-                    return this.parseFunctionMacroTail(name, params, false);
+                    return this.parseFunctionMacroTail(name, params);
                 } else {
                     if (first) {
                         first = false;
@@ -829,7 +829,7 @@ extend(DirectiveExecutor.prototype, {
                         params.push("__VA_ARGS__");
                         input.space(false);
                         input.expectPunc(")");
-                        return this.parseFunctionMacroTail(name, params, true);
+                        return this.parseFunctionMacroTail(name, params);
                     } else {
                         token = input.expectId();
                         params.push(token.value);

@@ -73,7 +73,7 @@ namespace cpp {
                 tokenBuffer << ' ';
                 while (!match("*/", false)) {
                     if (input.eof()) {
-                        throw "Unterminated comment";
+                        throw ParsingException("Unterminated comment");
                     }
                     advance();
                 }
@@ -98,7 +98,7 @@ namespace cpp {
         }
         auto str = tokenBuffer.str();
         if (str.empty()) {
-            return token_t(nullptr);
+            return token_t();
         } else {
             return std::make_shared<Token>(Token::WHITESPACE, tokenBuffer.str(), startPos, hasNewLine);
         }
@@ -136,7 +136,7 @@ namespace cpp {
             tokenBuffer << (char) c;
             advance();
         } else {
-            throw "Expected digit";
+            throw ParsingException("Expected digit");
         }
         while (!input.eof()) {
             if (match('E') || match('e')) {
@@ -148,7 +148,7 @@ namespace cpp {
                     tokenBuffer << (char) c;
                     advance();
                 } else {
-                    throw "Unexpected " + (char) c;
+                    throw ParsingException("Unexpected " + (char) c);
                 }
             } else if (isIdChar(c)) {
                 tokenBuffer << (char) c;
@@ -197,34 +197,43 @@ namespace cpp {
                 oct();
                 oct();
             } else {
-                throw "Unexpected " + (char) c;
+                throw ParsingException((std::string("Unexpected ") + (char) c).c_str());
             }
         }
     }
 
     token_t Tokenizer::parseCharSequence(char quote, Token::token_type type) {
         if (!match(quote))
-            throw "Expected " + quote;
+            throw ParsingException("Expected " + quote);
         while (!input.eof()) {
             if (match('\\')) {
                 parseEscape();
             } else if (match(quote)) {
                 return std::make_shared<Token>(type, tokenBuffer.str(), startPos);
             } else if (match('\r', false) || match('\n', false)) {
-                throw "Unterminated string";
+                throw ParsingException("Unterminated string");
             } else {
                 tokenBuffer << (char) input.peek();
                 advance();
             }
         }
-        throw "Unterminated string";
+        throw ParsingException("Unterminated string");
+    }
+
+    namespace {
+        std::string escape(int c) {
+            return c == '\t'? "\\t":
+                   c == '\f'? "\\f":
+                   c == '\n'? "\\n":
+                   c == '\r'? "\\r": "";
+        }
     }
     
     token_t Tokenizer::parseRawString() {
         int c;
         std::stringstream ss;
         if (!match('\"', true, true))
-            throw "Expected \"";
+            throw ParsingException("Expected \"");
         while (!input.eof()) {
             if (match('(', true, true)) {
                 auto indicator = ")" + ss.str() + "\"";
@@ -243,7 +252,7 @@ namespace cpp {
                     match('\f', false, true) ||
                     match('\r', false, true) ||
                     match('\n', false, true))) {
-                throw "Unexpected " + escape(c);
+                throw ParsingException(("Unexpected " + escape(c)).c_str());
             } else {
                 c = input.peek();
                 tokenBuffer << (char) c;
@@ -251,13 +260,13 @@ namespace cpp {
                 advance(true);
             }
         }
-        throw "Unterminated raw string";
+        throw ParsingException("Unterminated raw string");
     }
 
     token_t Tokenizer::_next() {
         int c = input.peek();
         if (input.eof())
-            return token_t(nullptr);
+            return token_t();
 
         startToken();
         auto space = parseSpace();
@@ -284,7 +293,7 @@ namespace cpp {
                 return isRaw? parseRawString(): parseCharSequence((char) c, Token::STRING);
             } else if (c == '\'') {
                 if (isRaw || needString)
-                    throw "Expected \"";
+                    throw ParsingException("Expected \"");
                 return parseCharSequence((char) c, Token::CHARACTER);
             } else {
                 pos = startPos;
@@ -309,10 +318,10 @@ namespace cpp {
             if (token) {
                 return token;
             } else {
-                expander = nullptr;
+                expander.reset();
             }
         }
-        auto token = input->next();
+        auto token = input()->next();
         if (token && token->type() == Token::IDENTIFIER) {
             return expandMacro(token);
         }
@@ -321,9 +330,9 @@ namespace cpp {
 
     token_t MacroExpander::expandMacro(token_t name) {
         if (name->value() == "__VA_ARGS__")
-            throw "Unexpected __VA_ARGS__";
-        if ((!stack || !(stack->hasName(name->value()))) && macroTable) {
-            auto macro = (*macroTable)[name->value()];
+            throw ParsingException("Unexpected __VA_ARGS__");
+        if ((!stack || !(stack()->hasName(name->value()))) && macroTable) {
+            auto macro = (*macroTable())[name->value()];
             if (macro) {
                 if (macro->isFunctionLike()) {
                     return expandFunctionMacro(name, *static_cast<FunctionMacro*>(macro.get()));
@@ -344,14 +353,14 @@ namespace cpp {
     }
 
     token_t MacroExpander::expandFunctionMacro(token_t name, const FunctionMacro &macro) {
-        auto token = input->space();
-        if (input->matchPunc('(')) {
-            input->space();
+        auto token = input()->space();
+        if (input()->matchPunc('(')) {
+            input()->space();
             std::vector<std::shared_ptr<std::deque<token_t>>> args;
             auto curArg = std::make_shared<std::deque<token_t>>();
             int depth = 0;
-            while (!input->finished()) {
-                if ((token = input->matchPunc(')'))) {
+            while (!input()->finished()) {
+                if ((token = input()->matchPunc(')'))) {
                     if (depth == 0) {
                         args.push_back(scanArg(curArg));
 
@@ -362,29 +371,28 @@ namespace cpp {
                         depth--;
                         curArg->push_back(token);
                     }
-                } else if ((token = input->matchPunc('('))) {
+                } else if ((token = input()->matchPunc('('))) {
                     depth++;
                     curArg->push_back(token);
-                } else if (depth == 0 && input->matchPunc(',')) {
-                    input->space();
+                } else if (depth == 0 && input()->matchPunc(',')) {
+                    input()->space();
                     args.push_back(scanArg(curArg));
                     curArg = std::make_shared<std::deque<token_t>>();
                 } else {
-                    curArg->push_back(input->next());
+                    curArg->push_back(input()->next());
                 }
             }
         } else {
             if (token)
-                input->unget(token);
+                input()->unget(token);
             return name;
         }
     }
 
     std::shared_ptr<std::deque<token_t>> MacroExpander::scanArg(std::shared_ptr<std::deque<token_t>> arg) {
-        auto stream = std::make_shared<TokenStream>(*arg);
-        MacroExpander expander(stream, macroTable, stack);
+        auto expander = makeExpander(*arg);
         std::shared_ptr<std::deque<token_t>> newArg;
-        while (auto token = expander.next()) {
+        while (auto token = expander->next()) {
             newArg->push_back(token);
         }
         return newArg;
@@ -425,7 +433,7 @@ namespace cpp {
 
         bool hasVAARGS = params[l-1] == "__VA_ARGS__";
         if (hasVAARGS? args.size() < l-1: args.size() != l) {
-            throw "Too few args";
+            throw ParsingException("Too few args");
         }
 
         bool ws = false;
@@ -435,7 +443,7 @@ namespace cpp {
             if (token->type() == Token::IDENTIFIER) {
                 if (token->value() == "__VA_ARGS__") {
                     if (!hasVAARGS)
-                        throw "Unexpected __VA_ARGS__";
+                        throw ParsingException("Unexpected __VA_ARGS__");
                     for (auto i = l-1; i<args.size(); i++) {
                         if (i > l-1) {
                             auto comma = std::make_shared<Token>(Token::PUNC, ",", PosInfo(token->pos()));
@@ -461,7 +469,7 @@ namespace cpp {
     namespace {
         token_t truncateLine(token_t token) {
             const std::string &v = token->value();
-            unsigned long pos;
+            unsigned long pos = 0;
             for (auto i = v.size()-1; i>=0; --i) {
                 if (v[i] == '\n') {
                     if (i > 0 && v[i-1] == '\r') {
@@ -480,50 +488,205 @@ namespace cpp {
     }
 
     token_t DirectiveParser::_next() {
-        if (lineStart && input->matchPunc('#')) {
-            lineStart = false;
-            input->space(false);
-            if (input->matchId("define")) {
-                input->space(false);
+        if (lineStart && input()->matchPunc('#')) {
+            input()->space(false);
+            if (input()->matchId("define")) {
+                input()->space(false);
                 return parseDefine();
-            } else if (input->matchId("undef")) {
-                input->space(false);
+            } else if (input()->matchId("undef")) {
+                input()->space(false);
                 return parseUndef();
-            } else if (input->matchId("if")) {
+            } else if (input()->matchId("if")) {
                 return parseIf(false);
-            } else if (input->matchId("ifdef")) {
+            } else if (input()->matchId("ifdef")) {
                 return parseIf(true, false);
-            } else if (input->matchId("ifndef")) {
+            } else if (input()->matchId("ifndef")) {
                 return parseIf(true, true);
-            } else if (input->matchId("elif")) {
-
-            } else if (input->matchId("else")) {
-
-            } else if (input->matchId("endif")) {
-
+            } else if (input()->matchId("elif")) {
+                if (ifStack.empty() || ifStack.back() != 1) {
+                    throw ParsingException("Unexpected #elif");
+                }
+                ifStack.pop_back();
+                parseCondition(readLine(), macroTable(), stack());
+                return skipIfElseClauses(1);
+            } else if (input()->matchId("else")) {
+                if (ifStack.empty() || ifStack.back() != 1) {
+                    throw ParsingException("Unexpected #else");
+                }
+                ifStack.pop_back();
+                input()->expectNewLine();
+                return skipIfElseClauses(0);
+            } else if (input()->matchId("endif")) {
+                if (ifStack.empty()) {
+                    throw ParsingException("Unexpected #endif");
+                }
+                ifStack.pop_back();
+                return truncateLine(input()->expectNewLine());
+            } else if (input()->matchId("include")) {
+                
             } else {
                 skipLine();
             }
+        } else {
+            auto token = input()->next();
+            if (token && token->type() == Token::WHITESPACE && token->hasNewLine()) {
+                lineStart = true;
+            }
+            return token;
         }
     }
 
     token_t DirectiveParser::skipLine() {
-        while (auto token = input->next()) {
+        while (auto token = input()->next()) {
             if (token->type() == Token::WHITESPACE && token->hasNewLine()) {
+                lineStart = true;
                 return truncateLine(token);
             }
         }
-        return token_t(nullptr);
+        return token_t();
     }
 
-    token_t DirectiveParser::parseDefine() { }
-    token_t DirectiveParser::parseUndef() { }
-    token_t DirectiveParser::parseIf(bool defined, bool neg) { }
+    std::deque<token_t> DirectiveParser::readLine(bool allowVAARGS) {
+        std::deque<token_t> result;
+        lineStart = false;
+        while (auto token = input()->next()) {
+            if (token->type() == Token::WHITESPACE && token->hasNewLine()) {
+                input()->unget(token);
+                lineStart = true;
+                break;
+            } else if (!allowVAARGS &&
+                    token->type() == Token::IDENTIFIER &&
+                    token->value() == "__VA_ARGS__") {
+                throw ParsingException("Unexpected __VA_ARGS__");
+            } else {
+                result.push_back(token);
+            }
+        }
+        if (!lineStart && !result.empty() &&
+                result.back()->type() == Token::WHITESPACE) {
+            result.pop_back();
+        }
+        return result;
+    }
+
+    token_t DirectiveParser::parseDefine() {
+        const auto &name = input()->expectId()->value();
+        if (input()->matchPunc('(')) {
+            input()->space(false);
+            bool first = true;
+            auto macro = std::make_shared<FunctionMacro>(name);
+            while (input()->finished()) {
+                if (input()->matchPunc(')')) {
+                    macro->setBody(readLine());
+                    (*macroTable())[name] = macro;
+                    return truncateLine(input()->expectNewLine());
+                } else {
+                    if (first) {
+                        first = false;
+                    } else {
+                        input()->expectPunc(',');
+                        input()->space(false);
+                    }
+                    if (input()->matchPunc("...")) {
+                        macro->addParam("__VA_ARGS__");
+                        input()->space(false);
+                        input()->expectPunc(')');
+                        macro->setBody(readLine(true));
+                        (*macroTable())[name] = macro;
+                        return truncateLine(input()->expectNewLine());
+                    } else {
+                        macro->addParam(input()->expectId()->value());
+                    }
+                }
+            }
+            throw ParsingException("Expected )");
+        } else {
+            if (!input()->space(false)) {
+                throw ParsingException("Expected space");
+            }
+            auto macro = std::make_shared<Macro>(name);
+            macro->setBody(readLine());
+            (*macroTable())[name] = macro;
+            return truncateLine(input()->expectNewLine());
+        }
+    }
+
+    token_t DirectiveParser::parseUndef() {
+        const auto &name = input()->expectId()->value();
+        auto it = macroTable()->find(name);
+        if (it != macroTable()->end) {
+            macroTable()->erase(it);
+        }
+        return truncateLine(input()->expectNewLine());
+    }
+
+    token_t DirectiveParser::parseIf(bool defined, bool neg, bool skip) {
+        input()->space(false);
+        bool cond;
+        if (defined) {
+            const auto &name = input()->expectId()->value();
+            cond = (bool) (*macroTable())[name] != neg;
+        } else {
+            cond = parseCondition(readLine(), macroTable(), stack());
+        }
+        auto token = input()->expectNewLine();
+        if (skip)
+            return skipIfElseClauses(1);
+        if (cond) {
+            ifStack.push_back(false);
+            return truncateLine(token);
+        } else {
+            return skipIfElseClauses(2);
+        }
+    }
+
+    token_t DirectiveParser::skipIfElseClauses(int state) {
+        while (true) {
+            if (input()->matchPunc('#')) {
+                input()->space(false);
+                if (input()->matchId("if")) {
+                    parseIf(false, false, true);
+                } else if (input()->matchId("ifdef")) {
+                    parseIf(true, false, true);
+                } else if (input()->matchId("else")) {
+                    if (state == 0) {
+                        throw ParsingException("Unexpected #else");
+                    }
+                    auto token = input()->expectNewLine();
+                    if (state == 2) {
+                        ifStack.push_back(2);
+                        return truncateLine(token);
+                    }
+                } else if (input()->matchId("elif")) {
+                    if (state == 0) {
+                        throw ParsingException("Unexpected #elif");
+                    }
+                    input()->space(false);
+                    bool cond = parseCondition(readLine(), macroTable(), stack());
+                    auto token = input()->expectNewLine();
+                    if (state == 2) {
+                        ifStack.push_back(1);
+                        return truncateLine(token);
+                    }
+                } else if (input()->matchId("endif")) {
+                    return truncateLine(input()->expectNewLine());
+                } else {
+                    skipLine();
+                }
+            } else if (!skipLine()) {
+                return token_t();
+            }
+        }
+    }
+
+    macro_val_t ConditionParser::parse() {
+        return macro_val_t(0L);
+    }
 }
 
 inline void assert(bool cond) {
     if (!cond)
-        throw "Assertion failed";
+        throw cpp::ParsingException("Assertion failed");
 }
 
 void testTokenizer() {
@@ -586,29 +749,20 @@ void testMacroExpansion() {
     macro_table_t table = std::make_shared<std::map<std::string, std::shared_ptr<Macro>>>();
     auto macro = std::make_shared<Macro>("foo");
     PosInfo pi("anon");
-    macro->addToken(std::make_shared<Token>(Token::NUMBER, "2", pi));
+    std::deque<token_t> body;
+    body.push_back(std::make_shared<Token>(Token::NUMBER, "2", pi));
+    macro->setBody(body);
     (*table)["foo"] = macro;
-    auto expander = (new Tokenizer(ss, "anon"))->expandMacro(table);
+    auto tokenizer = std::make_shared<Tokenizer>(ss, "anon");
+    auto expander = std::make_shared<MacroExpander>(tokenizer, table, std::shared_ptr<MacroStack>());
     auto token = expander->next();
     std::cout << token->type() << std::endl;
     std::cout << token->value() << std::endl;
 }
-
-class A {
-public:
-    ~A() {
-        std::cout << "destructor" << std::endl;
-    }
-};
 
 int main(int argc, char **argv) {
     /*std::ifstream ifs;
     ifs.open("/home/wsy/courses/OOP/lab3/lab3.h");*/
     //testTokenizer();
     //testMacroExpansion();
-    A *pa = new A();
-    auto spa1 = new std::shared_ptr<A>(pa);
-    auto spa2 = new std::shared_ptr<A>(pa);
-    delete spa1;
-    delete spa2;
 }
