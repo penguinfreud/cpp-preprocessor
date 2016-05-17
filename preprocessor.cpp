@@ -2,40 +2,79 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <climits>
 #include "preprocessor.h"
 
 namespace cpp {
+    namespace {
+        std::string escape(int c) {
+            return c == '\t'? "\\t":
+                   c == '\f'? "\\f":
+                   c == '\n'? "\\n":
+                   c == '\r'? "\\r": std::string("") + (char) c;
+        }
+
+        void unexpected(int c) {
+            throw ParsingException((std::string("Unexpected '") + escape(c) + (char) '\'').c_str());
+        }
+
+        bool isHexDigit(int c) {
+            return (c >= '0' && c <= '9' ||
+                    c >= 'A' && c <= 'F' ||
+                    c >= 'a' && c <= 'f');
+        }
+
+        int hexDigit(int c) {
+            if (c >= '0' && c <= '9')
+                return c - '0';
+            else if (c >= 'A' && c <= 'F')
+                return c - 'A' + 10;
+            else if (c >= 'a' && c <= 'f')
+                return c - 'a' + 10;
+            return -1;
+        }
+
+        bool isOctDigit(int c) {
+            return c >= '0' && c <= '7';
+        }
+
+        bool isIdChar(int c) {
+            return isdigit(c) || isalpha(c) || c == '_';
+        }
+    }
+
     void Tokenizer::spliceLine() {
+        auto _pos(pos);
         if (input.peek() == '\\') {
-            input.ignore();
+            advanceRaw();
             int c = input.peek();
             if (c == '\r') {
-                input.ignore();
-                pos.pos += 2;
-                newLine();
+                advanceRaw();
+                pos.newLine();
                 if (input.peek() == '\n') {
                     input.ignore();
-                    pos.pos++;
+                    advanceRaw();
                 }
             } else if (c == '\n') {
-                input.ignore();
-                pos.pos += 2;
-                newLine();
+                advanceRaw();
+                pos.newLine();
             } else {
+                pos = _pos;
                 input.unget();
                 input.clear();
             }
         }
     }
 
-    void Tokenizer::advance(bool raw) {
+    void Tokenizer::advanceRaw() {
         int c = input.get();
         if (c == '\r') {
             hasReturn = true;
-            newLine();
+            pos.newLine();
         } else if (c == '\n') {
             if (!hasReturn) {
-                newLine();
+                pos.newLine();
+            } else {
                 hasReturn = false;
             }
         } else {
@@ -43,25 +82,21 @@ namespace cpp {
             hasReturn = false;
         }
         pos.pos++;
-        if (!raw)
-            spliceLine();
     }
 
     bool Tokenizer::match(const std::string &s, bool output, bool raw) {
         auto p = input.tellg();
-        auto buf = tokenBuffer.str();
-        auto bufP = tokenBuffer.tellp();
-        auto pi(pos);
+        auto _pos(pos);
         for (auto c: s) {
-            if (!match(c, output, raw)) {
+            if (raw? !matchRaw(c, false): !match(c, false)) {
                 input.clear();
                 input.seekg(p);
-                pos = pi;
-                tokenBuffer.str(buf);
-                tokenBuffer.seekp(bufP);
+                pos = _pos;
                 return false;
             }
         }
+        if (output)
+            tokenBuffer << s;
         return true;
     }
 
@@ -148,7 +183,7 @@ namespace cpp {
                     tokenBuffer << (char) c;
                     advance();
                 } else {
-                    throw ParsingException("Unexpected " + (char) c);
+                    unexpected((char) c);
                 }
             } else if (isIdChar(c)) {
                 tokenBuffer << (char) c;
@@ -171,12 +206,22 @@ namespace cpp {
         return std::make_shared<Token>(Token::PUNC, (char*)&c, startPos);
     }
 
+    void Tokenizer::hex() {
+        int c = input.peek();
+        if (isHexDigit(c)) {
+            advance();
+            tokenBuffer << (char) c;
+        } else {
+            throw ParsingException("Expected hexadecimal digit");
+        }
+    }
+
     void Tokenizer::parseEscape() {
         int c;
         if (match('\'') || match('\"') || match('?') || match('\\') ||
                 match('a') || match('b') || match('f') || match('n') ||
                 match('r') || match('t') || match('v')) {
-        } else if (match('x') || match('u')) {
+        } else if (match('u')) {
             hex();
             hex();
             hex();
@@ -190,14 +235,24 @@ namespace cpp {
             hex();
             hex();
             hex();
+        } else if (match('x')) {
+            c = input.peek();
+            if (isHexDigit(c)) {
+                do {
+                    advance();
+                    tokenBuffer << (char) c;
+                } while (isHexDigit(c));
+            } else {
+                unexpected((char) c);
+            }
         } else {
             c = input.peek();
-            if (c >= '0' && c <= '7') {
+            if (isOctDigit(c)) {
                 oct();
                 oct();
                 oct();
             } else {
-                throw ParsingException((std::string("Unexpected ") + (char) c).c_str());
+                unexpected((char) c);
             }
         }
     }
@@ -219,45 +274,36 @@ namespace cpp {
         }
         throw ParsingException("Unterminated string");
     }
-
-    namespace {
-        std::string escape(int c) {
-            return c == '\t'? "\\t":
-                   c == '\f'? "\\f":
-                   c == '\n'? "\\n":
-                   c == '\r'? "\\r": "";
-        }
-    }
     
     token_t Tokenizer::parseRawString() {
         int c;
         std::stringstream ss;
-        if (!match('\"', true, true))
+        if (!matchRaw('\"', true))
             throw ParsingException("Expected \"");
         while (!input.eof()) {
-            if (match('(', true, true)) {
+            if (matchRaw('(', true)) {
                 auto indicator = ")" + ss.str() + "\"";
                 while (!input.eof()) {
                     if (match(indicator, true, true)) {
                         return std::make_shared<Token>(Token::STRING, tokenBuffer.str(), startPos);
                     } else {
                         tokenBuffer << (char) input.peek();
-                        advance(true);
+                        advanceRaw();
                     }
                 }
-            } else if ((c = match(' ', false, true) ||
-                    match(')', false, true) ||
-                    match('\\', false, true) ||
-                    match('\t', false, true) ||
-                    match('\f', false, true) ||
-                    match('\r', false, true) ||
-                    match('\n', false, true))) {
-                throw ParsingException(("Unexpected " + escape(c)).c_str());
+            } else if ((c = matchRaw(' ', false) ||
+                    matchRaw(')', false) ||
+                    matchRaw('\\', false) ||
+                    matchRaw('\t', false) ||
+                    matchRaw('\f', false) ||
+                    matchRaw('\r', false) ||
+                    matchRaw('\n', false))) {
+                unexpected((char) c);
             } else {
                 c = input.peek();
                 tokenBuffer << (char) c;
                 ss << (char) c;
-                advance(true);
+                advanceRaw();
             }
         }
         throw ParsingException("Unterminated raw string");
@@ -277,16 +323,12 @@ namespace cpp {
         if (input.peek() == '.' || isdigit(input.peek())) {
             return parseNumber();
         } else if (match('u') || match('U') || match('L') || match('R')) {
-            bool needString = false, isRaw = false;
+            bool needString = false, isRaw;
             if (c == 'R') {
                 isRaw = true;
             } else {
-                if (c == 'u' && match('8')) {
-                    needString = true;
-                }
-                if (match('R')) {
-                    isRaw = true;
-                }
+                needString = c == 'u' && match('8');
+                isRaw = match('R') > 0;
             }
             c = input.peek();
             if (c == '"') {
@@ -331,7 +373,7 @@ namespace cpp {
     token_t MacroExpander::expandMacro(token_t name) {
         if (name->value() == "__VA_ARGS__")
             throw ParsingException("Unexpected __VA_ARGS__");
-        if ((!stack || !(stack()->hasName(name->value()))) && macroTable) {
+        if ((!stack() || !(stack()->hasName(name->value()))) && macroTable()) {
             auto macro = (*macroTable())[name->value()];
             if (macro) {
                 if (macro->isFunctionLike()) {
@@ -347,7 +389,7 @@ namespace cpp {
     token_t MacroExpander::expandObjectMacro(const Macro &macro) {
         if (!macro.empty()) {
             auto stream = std::make_shared<TokenStream>(macro.body());
-            expander = std::make_shared<MacroExpander>(stream, macroTable, std::make_shared<MacroStack>(macro.name(), stack));
+            expander = std::make_shared<MacroExpander>(stream, macroTable(), std::make_shared<MacroStack>(macro.name(), stack()));
         }
         return _next();
     }
@@ -365,7 +407,7 @@ namespace cpp {
                         args.push_back(scanArg(curArg));
 
                         auto stream = std::make_shared<TokenStream>(subBody(macro, args));
-                        expander = std::make_shared<MacroExpander>(stream, macroTable, std::make_shared<MacroStack>(macro.name(), stack));
+                        expander = std::make_shared<MacroExpander>(stream, macroTable(), std::make_shared<MacroStack>(macro.name(), stack()));
                         return _next();
                     } else {
                         depth--;
@@ -382,6 +424,7 @@ namespace cpp {
                     curArg->push_back(input()->next());
                 }
             }
+            throw ParsingException("Expected )");
         } else {
             if (token)
                 input()->unget(token);
@@ -410,13 +453,13 @@ namespace cpp {
             }
         }
 
-        void appendTokens(std::deque<token_t> &list, std::shared_ptr<std::deque<token_t>> append, bool &ws) {
+        inline void appendTokens(std::deque<token_t> &list, std::shared_ptr<std::deque<token_t>> append, bool &ws) {
             for (auto token: *append) {
                 appendToken(list, token, ws);
             }
         }
 
-        int findParam(const std::deque<std::string> &params, const std::string &name) {
+        inline int findParam(const std::deque<std::string> &params, const std::string &name) {
             for (int i = 0; i<params.size(); i++) {
                 if (params[i] == name)
                     return i;
@@ -523,9 +566,9 @@ namespace cpp {
                 ifStack.pop_back();
                 return truncateLine(input()->expectNewLine());
             } else if (input()->matchId("include")) {
-                
+
             } else {
-                skipLine();
+                return skipLine();
             }
         } else {
             auto token = input()->next();
@@ -614,7 +657,7 @@ namespace cpp {
     token_t DirectiveParser::parseUndef() {
         const auto &name = input()->expectId()->value();
         auto it = macroTable()->find(name);
-        if (it != macroTable()->end) {
+        if (it != macroTable()->end()) {
             macroTable()->erase(it);
         }
         return truncateLine(input()->expectNewLine());
@@ -662,7 +705,7 @@ namespace cpp {
                         throw ParsingException("Unexpected #elif");
                     }
                     input()->space(false);
-                    bool cond = parseCondition(readLine(), macroTable(), stack());
+                    parseCondition(readLine(), macroTable(), stack());
                     auto token = input()->expectNewLine();
                     if (state == 2) {
                         ifStack.push_back(1);
@@ -679,8 +722,364 @@ namespace cpp {
         }
     }
 
-    macro_val_t ConditionParser::parse() {
-        return macro_val_t(0L);
+    namespace {
+        inline void outOfRange() {
+            throw ParsingException("Number out of range");
+        }
+    }
+
+    namespace {
+        inline void checkFp(char c) {
+            if (c == '.')
+                throw ParsingException("Floating point number is not allowed");
+        }
+
+        inline void checkRange(unsigned long x, int shift) {
+            if (x > ULONG_MAX >> shift) {
+                outOfRange();
+            }
+        }
+
+        MacroValue parseInt(const std::string &v) {
+            unsigned long x = 0;
+            int p = 0;
+            auto l = v.size();
+            char c = v[p];
+            checkFp(c);
+            if (c == '0') {
+                p++;
+                if (p < l) {
+                    c = v[p];
+                    checkFp(c);
+                    if (c == 'x' || c == 'X') {
+                        p++;
+                        while (p < l) {
+                            c = v[p];
+                            if (c == 'U' || c == 'L')
+                                break;
+                            if (!isHexDigit(c))
+                                unexpected(c);
+                            checkRange(x, 4);
+                            x = (x << 4) + hexDigit(c);
+                            p++;
+                        }
+                    } else if (c == 'b' || c == 'B') {
+                        p++;
+                        while (p < l) {
+                            c = v[p];
+                            if (c == 'U' || c == 'L')
+                                break;
+                            if (c != '0' && c != '1')
+                                unexpected(c);
+                            int d = c - '0';
+                            checkRange(x, 1);
+                            x = (x << 1) + d;
+                            p++;
+                        }
+                    } else {
+                        while (p < l) {
+                            c = v[p];
+                            if (c == 'U' || c == 'L')
+                                break;
+                            if (c == '\'') {
+                                p++;
+                                if (p >= l)
+                                    throw ParsingException("Expected digit");
+                                c = v[p];
+                            }
+                            if (!isOctDigit(c))
+                                unexpected(c);
+                            int d = c - '0';
+                            checkRange(x, 3);
+                            x = (x << 3) + d;
+                            p++;
+                        }
+                    }
+                }
+            } else if (c >= '0' && c <= '9') {
+                x += c - '0';
+                p++;
+                while (p < l) {
+                    c = v[p];
+                    checkFp(c);
+                    if (c == 'U' || c == 'L')
+                        break;
+                    if (c < '0' || c > '9')
+                        unexpected(c);
+                    int d = c - '0';
+                    if (x > (ULONG_MAX - d) / 10)
+                        throw ParsingException("Number out of range");
+                    x = x * 10 + d;
+                    p++;
+                }
+            } else {
+                unexpected(c);
+            }
+            return MacroValue(x);
+        }
+        
+        MacroValue parseCharacter(const std::string &v) {
+            unsigned long x = 0;
+            unsigned long p = 0;
+            auto l = v.size();
+            char c = v[p];
+            int bits = 1;
+            if (c == 'u') {
+                bits = 2;
+                p++;
+            } else if (c == 'U' || c == 'L') {
+                bits = 4;
+                p++;
+            }
+            p++;
+            while (p < l) {
+                c = v[p];
+                int d = 0;
+                if (c == '\'') {
+                    break;
+                } else if (c == '\\') {
+                    p++;
+                    c = v[p];
+                    if (c == 'a') {
+                        d = '\a';
+                    } else if (c == 'b') {
+                        d = '\b';
+                    } else if (c == 'f') {
+                        d = '\f';
+                    } else if (c == 'n') {
+                        d = '\n';
+                    } else if (c == 'r') {
+                        d = '\r';
+                    } else if (c == 't') {
+                        d = '\t';
+                    } else if (c == 'v') {
+                        d = '\v';
+                    } else if (c == 'u') {
+                        if (bits < 2)
+                            throw ParsingException("\\u escape not allowed");
+                        p++;
+                        d = hexDigit(v[p]) << 12 |
+                                hexDigit(v[p+1]) << 8 |
+                                hexDigit(v[p+2]) << 4 |
+                                hexDigit(v[p+3]);
+                        p += 4;
+                    } else if (c == 'U') {
+                        if (bits < 4)
+                            throw ParsingException("\\U escape not allowed");
+                        p++;
+                        d = hexDigit(v[p]) << 28 |
+                            hexDigit(v[p+1]) << 24 |
+                            hexDigit(v[p+2]) << 20 |
+                            hexDigit(v[p+3]) << 16 |
+                            hexDigit(v[p+4]) << 12 |
+                            hexDigit(v[p+5]) << 8 |
+                            hexDigit(v[p+6]) << 4 |
+                            hexDigit(v[p+7]);
+                        p += 8;
+                    } else if (c == 'x') {
+                        d = 0;
+                        int b = 0;
+                        while (p < l) {
+                            c = v[p];
+                            if (!isHexDigit(c))
+                                break;
+                            d = d << 4 | hexDigit(c);
+                            b += 2;
+                            if (b > bits)
+                                throw ParsingException("Invalid escape");
+                            p++;
+                        }
+                    } else if (isOctDigit(c)) {
+                        d = c - '0';
+                        p++;
+                        if (p < l) {
+                            c = v[p];
+                            if (isOctDigit(c)) {
+                                d = (d << 3) | (c - '0');
+                                p++;
+                                if (p < l) {
+                                    c = v[p];
+                                    if (isOctDigit(c)) {
+                                        d = (d << 3) | (c - '0');
+                                        p++;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        unexpected(c);
+                    }
+                } else {
+                    d = c;
+                }
+                checkRange(x, bits);
+                x = (x << bits) | d;
+            }
+            return MacroValue(x);
+        }
+    }
+
+    MacroValue ConditionParser::parsePrimary() {
+        auto token = next();
+        if (token->type() == Token::NUMBER) {
+            return parseInt(token->value());
+        } else if (token->type() == Token::CHARACTER) {
+            return parseCharacter(token->value());
+        } else if (token->type() == Token::IDENTIFIER) {
+            if (token->value() == "true") {
+                return MacroValue(1UL);
+            } else {
+                return MacroValue(0UL);
+            }
+        } else {
+            throw ParsingException(("Unexpected " + token->value()).c_str());
+        }
+    }
+
+    MacroValue ConditionParser::parseUnary() {
+        while (matchPunc('+')) {}
+        if (matchPunc('-'))
+            return -parseUnary();
+        else if (matchPunc('~'))
+            return ~parseUnary();
+        else if (matchPunc('!') || matchId("not"))
+            return !parseUnary();
+        else
+            return parsePrimary();
+    }
+
+    MacroValue ConditionParser::parseMultiply() {
+        auto v = parseUnary();
+        while (!finished()) {
+            if (matchPunc('*'))
+                v = v * parseUnary();
+            else if (matchPunc('/')) {
+                auto w = parseUnary();
+                if (w.isUnsigned) {
+                    if (w.v.ul == 0)
+                        throw ParsingException("Divide by zero");
+                } else {
+                    if (w.v.l == 0)
+                        throw ParsingException("Divide by zero");
+                }
+                v = v / parseUnary();
+            } else if (matchPunc('%'))
+                v = v % parseUnary();
+            else
+                break;
+        }
+        return v;
+    }
+
+    MacroValue ConditionParser::parseAdd() {
+        auto v = parseMultiply();
+        while (!finished()) {
+            if (matchPunc('+'))
+                v = v + parseMultiply();
+            else if (matchPunc('-'))
+                v = v - parseMultiply();
+            else
+                break;
+        }
+        return v;
+    }
+
+    MacroValue ConditionParser::parseShift() {
+        auto v = parseAdd();
+        while (!finished()) {
+            if (matchPunc("<<"))
+                v = v << parseAdd();
+            else if (matchPunc(">>"))
+                v = v >> parseAdd();
+            else
+                break;
+        }
+        return v;
+    }
+
+    MacroValue ConditionParser::parseRelation() {
+        auto v = parseShift();
+        while (!finished()) {
+            if (matchPunc('<'))
+                v = v < parseShift();
+            else if (matchPunc("<="))
+                v = v <= parseShift();
+            else if (matchPunc('>'))
+                v = v > parseShift();
+            else if (matchPunc(">="))
+                v = v > parseShift();
+            else
+                break;
+        }
+        return v;
+    }
+
+    MacroValue ConditionParser::parseEquality() {
+        auto v = parseRelation();
+        while (!finished()) {
+            if (matchPunc("==") || matchId("eq"))
+                v = v == parseRelation();
+            else if (matchPunc("!=") || matchId("not_eq"))
+                v = v != parseRelation();
+            else
+                break;
+        }
+        return v;
+    }
+
+    MacroValue ConditionParser::parseBitwiseAnd() {
+        auto v = parseEquality();
+        while (matchPunc('&') || matchId("bitand"))
+            v = v & parseEquality();
+        return v;
+    }
+
+    MacroValue ConditionParser::parseXor() {
+        auto v = parseBitwiseAnd();
+        while (matchPunc('^') || matchId("xor"))
+            v = v ^ parseBitwiseAnd();
+        return v;
+    }
+
+    MacroValue ConditionParser::parseBitwiseOr() {
+        auto v = parseXor();
+        while (matchPunc('|') || matchId("bitor"))
+            v = v | parseXor();
+        return v;
+    }
+
+    MacroValue ConditionParser::parseAnd() {
+        auto v = parseBitwiseOr();
+        while (matchPunc("&&") || matchId("and"))
+            v = v && parseBitwiseOr();
+        return v;
+    }
+
+    MacroValue ConditionParser::parseOr() {
+        auto v = parseAnd();
+        while (matchPunc("||") || matchId("or"))
+            v = v || parseAnd();
+        return v;
+    }
+
+    MacroValue ConditionParser::parseConditional() {
+        auto cond = parseOr();
+        if (matchPunc('?')) {
+            auto seq = parseConditional();
+            expectPunc(':');
+            auto alt = parseConditional();
+            return cond? seq: alt;
+        } else {
+            return cond;
+        }
+    }
+
+    MacroValue ConditionParser::parse() {
+        auto v = parseConditional();
+        while (matchPunc(',')) {
+            v = parseConditional();
+        }
+        return v;
     }
 }
 
@@ -765,4 +1164,5 @@ int main(int argc, char **argv) {
     ifs.open("/home/wsy/courses/OOP/lab3/lab3.h");*/
     //testTokenizer();
     //testMacroExpansion();
+    std::cout << !LONG_MAX << std::endl;
 }

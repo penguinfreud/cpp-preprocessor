@@ -1106,7 +1106,7 @@ extend(ConditionParser.prototype, {
             if (this.matchPunc("<<")) {
                 this.space(false);
                 first <<= this.parseAdd();
-            } else if (matchPunc(">>")) {
+            } else if (this.matchPunc(">>")) {
                 this.space(false);
                 first >>= this.parseAdd();
             } else {
