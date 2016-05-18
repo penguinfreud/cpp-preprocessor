@@ -2,11 +2,14 @@
 #define PREPROCESSOR_H
 
 #include <istream>
+#include <iostream>
+#include <sstream>
 #include <vector>
 #include <deque>
 #include <memory>
 #include <map>
 #include <string>
+#include <cstring>
 
 namespace cpp {
 /*
@@ -209,15 +212,39 @@ namespace cpp {
  * */
 
 
-    const int PP_PUNCS_COUNT = 57;
-    char PP_PUNCS[PP_PUNCS_COUNT][4] = {
-            "->*", "%:%", "...", ">>=", "<<=", "##", "<:", ":>",
-            "<%", "%>", "%:", "::", ".*", "+=", "-=", "*=", "/=",
-            "%=", "^=", "&=", "|=", "<<", ">>", "==", "!=", "<=",
-            ">=", "&&", "||", "++", "--", "->", "{", "}", "[",
-            "]", "#", "(", ")", ";", ":", "?", ".", "+", "-",
-            "*", "/", "%", "^", "&", "|", "~", "!", "=", "<", ">", ","
-    };
+#define PP_PUNCS_COUNT 57
+    extern char PP_PUNCS[PP_PUNCS_COUNT][4];
+
+    inline std::string escape(int c) {
+        return c == '\t'? "\\t":
+               c == '\f'? "\\f":
+               c == '\n'? "\\n":
+               c == '\r'? "\\r": std::string("") + (char) c;
+    }
+
+    inline bool isHexDigit(int c) {
+        return (c >= '0' && c <= '9' ||
+                c >= 'A' && c <= 'F' ||
+                c >= 'a' && c <= 'f');
+    }
+
+    inline int hexDigit(int c) {
+        if (c >= '0' && c <= '9')
+            return c - '0';
+        else if (c >= 'A' && c <= 'F')
+            return c - 'A' + 10;
+        else if (c >= 'a' && c <= 'f')
+            return c - 'a' + 10;
+        return -1;
+    }
+
+    inline bool isOctDigit(int c) {
+        return c >= '0' && c <= '7';
+    }
+
+    inline bool isIdChar(int c) {
+        return isdigit(c) || isalpha(c) || c == '_';
+    }
 
     class PosInfo {
     public:
@@ -230,7 +257,17 @@ namespace cpp {
             line++;
             col = 0;
         }
+
+        PosInfo operator+(int off) const {
+            PosInfo result(file);
+            result.line = line;
+            result.col = col + off;
+            result.pos = pos + off;
+            return result;
+        }
     };
+
+    extern PosInfo posStart;
 
     class Token {
     public:
@@ -240,7 +277,8 @@ namespace cpp {
             NUMBER,
             CHARACTER,
             STRING,
-            PUNC
+            PUNC,
+            OTHER
         };
 
         inline Token(token_type t, const std::string &v, const PosInfo &posInfo, bool nl = false):
@@ -250,7 +288,7 @@ namespace cpp {
             return _type;
         }
 
-        inline const std::string &value() const {
+        inline std::string value() const {
             return _value;
         }
 
@@ -258,7 +296,7 @@ namespace cpp {
             return _hasNewLine;
         }
 
-        inline const PosInfo &pos() const {
+        inline PosInfo pos() const {
             return _pos;
         }
 
@@ -321,15 +359,29 @@ namespace cpp {
 
     class ParsingException: public std::exception {
     public:
-        inline ParsingException(const char *s):
-                std::exception(), msg(s) {}
+        inline ParsingException(const char *s, const PosInfo& p) throw():
+                std::exception(), msg(s), pos(p) {
+            std::stringstream ss;
+            ss << pos.file << "[line:" << pos.line << ", col:" << pos.col << "]: " << msg;
+            const std::string &str = ss.str();
+            messageWithPos = new char[str.size() + 1];
+            strcpy(messageWithPos, str.c_str());
+        }
 
-        virtual const char *what() {
-            return msg;
+        virtual ~ParsingException() throw() {}
+
+        virtual const char *what() throw() {
+            return messageWithPos;
         }
     private:
-        const char *msg;
+        const std::string msg;
+        char *messageWithPos;
+        const PosInfo pos;
     };
+
+    inline void unexpected(int c, const PosInfo &pos) {
+        throw ParsingException((std::string("Unexpected '") + escape(c) + (char) '\'').c_str(), pos);
+    }
 
     class MacroExpander;
 
@@ -348,6 +400,17 @@ namespace cpp {
             return true;
         }
 
+        inline PosInfo getPos() const {
+            if (buffer.empty())
+            return _getPos();
+            else
+                return buffer[0]->pos();
+        }
+
+        virtual PosInfo _getPos() const {
+            return posStart;
+        };
+
         inline token_t next() {
             if (buffer.empty()) {
                 return _next();
@@ -359,7 +422,7 @@ namespace cpp {
         }
 
         virtual token_t _next() {
-            return token_t(nullptr);
+            return token_t();
         }
 
         inline void unget(token_t token) {
@@ -371,7 +434,7 @@ namespace cpp {
             if (token && (token->type() != Token::WHITESPACE ||
                         (!allowNewLine && token->hasNewLine()))) {
                 unget(token);
-                return token_t(nullptr);
+                return token_t();
             } else {
                 return token;
             }
@@ -380,7 +443,7 @@ namespace cpp {
         inline token_t expectNewLine() {
             auto token = next();
             if (token && (token->type() != Token::WHITESPACE || !token->hasNewLine()))
-                throw ParsingException("Expected new line");
+                throw ParsingException("Expected new line", token->pos());
             return token;
         }
 
@@ -390,7 +453,7 @@ namespace cpp {
                 return token;
             } else {
                 unget(token);
-                return token_t(nullptr);
+                return token_t();
             }
         }
 
@@ -407,7 +470,7 @@ namespace cpp {
                 }
             }
             unget(token);
-            return token_t(nullptr);
+            return token_t();
         }
 
         inline token_t expectPunc(const std::string &v) {
@@ -415,7 +478,7 @@ namespace cpp {
             if (token && token->type() == Token::PUNC && token->value() == v) {
                 return token;
             } else {
-                throw ParsingException(("Expected " + v).c_str());
+                throw ParsingException(("Expected " + v).c_str(), token? token->pos(): getPos());
             }
         }
 
@@ -427,7 +490,7 @@ namespace cpp {
                     return token;
                 }
             }
-            throw ParsingException((std::string("Expected ") + c).c_str());
+            throw ParsingException((std::string("Expected ") + c).c_str(), token? token->pos(): getPos());
         }
 
         inline token_t matchId(const std::string &v) {
@@ -439,20 +502,20 @@ namespace cpp {
             if (token && token->type() == Token::IDENTIFIER) {
                 return token;
             } else {
-                throw ParsingException("Expected identifier");
+                throw ParsingException("Expected identifier", token? token->pos(): getPos());
             }
         }
 
-        inline void print(std::ostream os) {
-            auto prev = token_t(nullptr);
+        inline void print(std::ostream &os) {
+            auto prev = token_t();
             while (auto token = next()) {
-                if (prev) {
+                /*if (prev) {
                     if (prev->type() == Token::NUMBER ||
                             prev->type() == Token::IDENTIFIER ||
                             prev-> type() == Token::PUNC) {
                         os << ' ';
                     }
-                }
+                }*/
                 os << token->value();
             }
         }
@@ -463,16 +526,20 @@ namespace cpp {
 
     class Tokenizer: public TokenStream {
     public:
-        inline Tokenizer(std::istream &i, const std::string &f):
+        inline Tokenizer(std::shared_ptr<std::istream> i, const std::string &f):
                 TokenStream(), input(i), tokenBuffer(), pos(f), startPos(f), hasReturn(false) {}
 
         virtual bool _finished() const {
-            return input.eof();
+            return input->eof();
         }
 
-        inline void spliceLine();
+        virtual PosInfo _getPos() const {
+            return pos;
+        }
 
-        inline void advanceRaw();
+        void spliceLine();
+
+        void advanceRaw();
 
         inline void advance() {
             advanceRaw();
@@ -480,7 +547,7 @@ namespace cpp {
         }
 
         inline int matchRaw(int c, bool output = true) {
-            if (input.peek() == c) {
+            if (input->peek() == c) {
                 advanceRaw();
                 if (output)
                     tokenBuffer << (char) c;
@@ -491,7 +558,7 @@ namespace cpp {
         }
 
         inline int match(int c, bool output = true) {
-            if (input.peek() == c) {
+            if (input->peek() == c) {
                 advance();
                 if (output)
                     tokenBuffer << (char) c;
@@ -521,14 +588,14 @@ namespace cpp {
         inline void hex();
 
         inline void oct() {
-            int c = input.peek();
+            int c = input->peek();
             if (c >= '0' && c <= '7') {
                 advance();
                 tokenBuffer << (char) c;
             }
         }
 
-        std::istream &input;
+        std::shared_ptr<std::istream> input;
         std::stringstream tokenBuffer;
         PosInfo pos;
         PosInfo startPos;
@@ -595,7 +662,12 @@ namespace cpp {
                     (!expander || expander->finished());
         }
 
+        virtual PosInfo _getPos() const {
+            return expander? expander->getPos(): input()->getPos();
+        }
+
         virtual token_t _next();
+        token_t __next(bool enableMacro = true);
     private:
         token_t expandMacro(token_t name);
         token_t expandObjectMacro(const Macro& macro);
@@ -607,28 +679,45 @@ namespace cpp {
         std::shared_ptr<TokenStream> expander;
     };
 
+#define MAX_INCLUDE_RECURSION 15
     class DirectiveParser: public MacroProcessor {
     public:
-        inline DirectiveParser(std::shared_ptr<TokenStream> i, macro_table_t t, std::shared_ptr<MacroStack> s):
-                MacroProcessor(i, t, s), ifStack(), lineStart(true) {}
+        inline DirectiveParser(std::shared_ptr<TokenStream> i, macro_table_t t, std::shared_ptr<MacroStack> s, const std::string &f, int d):
+                MacroProcessor(i, t, s), recursionDepth(d), _file(f), ifStack(), lineStart(true), included() {}
 
         virtual bool _finished() const {
-            return input()->finished();
+            return input()->finished() &&
+                    (!included || included->finished());
+        }
+
+        virtual PosInfo _getPos() const {
+            return included? included->getPos(): input()->getPos();
+        }
+
+        std::string file() const {
+            return _file;
         }
 
         virtual token_t _next();
 
         token_t parseDefine();
         token_t parseUndef();
-        token_t parseIf(bool defined, bool neg = false, bool skip = false);
+        token_t parseIf(bool defined, bool neg = false);
+        token_t parseElif(const PosInfo &pos);
+        token_t parseElse(const PosInfo &pos);
+        token_t parseEndif(const PosInfo &pos);
+
+        token_t parseInclude(const PosInfo &pos);
+        token_t include(const std::string &path, const PosInfo &pos, token_t space, bool isQuote);
 
         std::deque<token_t> readLine(bool allowVAARGS = false);
         token_t skipLine();
     private:
-        token_t skipIfElseClauses(int state);
-
+        int recursionDepth;
+        std::string _file;
         std::vector<int> ifStack;
         bool lineStart;
+        std::shared_ptr<TokenStream> included;
     };
 
     class MacroValue {
@@ -730,7 +819,7 @@ namespace cpp {
         MacroValue parse();
     };
 
-    MacroValue parseCondition(const std::deque<token_t> &tokens, macro_table_t table, std::shared_ptr<MacroStack> stack) {
+    inline MacroValue parseCondition(const std::deque<token_t> &tokens, macro_table_t table, std::shared_ptr<MacroStack> stack) {
         ConditionParser cp(std::make_shared<TokenStream>(tokens), table, stack);
         return cp.parse();
     }

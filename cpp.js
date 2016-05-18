@@ -126,7 +126,7 @@ TokenStream.prototype = {
     },
     
     print: function (out) {
-        var prev = null;
+        var prev = null, token;
         while (token = this.next()) {
             if (prev) {
                 if (prev.type === NUMBER &&
@@ -722,7 +722,7 @@ extend(MacroExpander.prototype, {
             }
         }
         
-        var token = this.input.next();
+        token = this.input.next();
         if (!token) {
             return null;
         } else if (token.type === IDENTIFIER) {
